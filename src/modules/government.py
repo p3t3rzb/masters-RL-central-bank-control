@@ -1,14 +1,16 @@
 from pysolve.model import Model
 
+from src.modules.firms import NOMINAL_YEAR_AGO
+
 
 def add_government_equations(model: Model) -> None:
     model.add("G = Gk*P")  # 11.71 : Pure government expenditures
-    model.add("Gk = Gk(-1)*(1 + GRg)")  # 11.72 : Real government expenditures
+    model.add("Gk = Gk(-1)*(1 + GRg)**dt")  # 11.72 : Real government expenditures
     model.add(
-        "PSBR = G + BLs(-1) + Rb(-1)*(Bbs(-1) + Bhs(-1)) - T"
+        f"PSBR = G + (BLs(-1) + Rb(-1)*(Bbs(-1) + Bhs(-1)))*{NOMINAL_YEAR_AGO} - T"
     )  # 11.73 : Government deficit
     model.add(
-        "Bs - Bs(-1) = G - T - d(BLs)*Pbl + Rb(-1)*(Bhs(-1) + Bbs(-1)) + BLs(-1)"
+        f"Bs - Bs(-1) = dt*(G - T + (Rb(-1)*(Bhs(-1) + Bbs(-1)) + BLs(-1))*{NOMINAL_YEAR_AGO}) - d(BLs)*Pbl"
     )  # 11.74 : New issues of bills
     model.add("GD = Bbs + Bhs + BLs*Pbl + Hs")  # 11.75 : Government debt
 

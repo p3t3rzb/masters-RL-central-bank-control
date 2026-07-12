@@ -26,10 +26,11 @@ from src.modules.commercial_banks import (
 )
 
 
-def create_growth_model():
+def create_growth_model(dt=1):
     model = Model()
 
     model.set_var_default(0)
+    model.param("dt", desc="Length of one period in years", default=dt)
 
     add_firms_variables(model)
     add_firms_params(model)

@@ -1,30 +1,47 @@
 from pysolve.model import Model
 
+NOMINAL_YEAR_AGO = "((1 + GRk(-1))*(1 + PI(-1)))**(dt - 1)"  # nominal stocks/flows
+PRICE_YEAR_AGO = "(1 + PI(-1))**(dt - 1)"  # prices/unit costs
+REAL_YEAR_AGO = "(1 + GRk(-1))**(dt - 1)"  # real stocks
+
 
 def add_firms_equations(model: Model) -> None:
-    model.add("Yk = Ske + INke - INk(-1)")  # 11.1 : Real output
+    model.add("Yk = Ske + (INke - INk(-1))/dt")  # 11.1 : Real output
     model.add(
-        "Ske = beta*Sk + (1-beta)*Sk(-1)*(1 + (GRpr + RA))"
+        "Ske = (1 - (1-beta)**dt)*Sk + (1-beta)**dt*Sk(-1)*(1 + (GRpr + RA))**dt"
     )  # 11.2 : Expected real sales
     model.add("INkt = sigmat*Ske")  # 11.3 : Long-run inventory target
     model.add(
-        "INke = INk(-1) + gamma*(INkt - INk(-1))"
+        "INke = INk(-1) + (1 - (1-gamma)**dt)*(INkt - INk(-1))"
     )  # 11.4 : Short-run inventory target
-    model.add("INk - INk(-1) = Yk - Sk - NPL/UC")  # 11.5 : Actual real inventories
-    model.add("Kk = Kk(-1)*(1 + GRk)")  # 11.6 : Real capital stock
+    model.add("INk - INk(-1) = dt*(Yk - Sk - NPL/UC)")  # 11.5 : Actual real inventories
+    model.add("Kk = Kk(-1)*(1 + GRk)**dt")  # 11.6 : Real capital stock
     model.add(
         "GRk = gamma0 + gammau*U(-1) - gammar*RRl"
     )  # 11.7 : Growth of real capital stock
-    model.add("U = Yk/Kk(-1)")  # 11.8 : Capital utilization proxy
+    model.add(
+        "U = Yk/(Kk(-1)*(1 + GRk(-1))**(dt - 1))"
+    )  # 11.8 : Capital utilization proxy (relative to capital one year ago)
     model.add("RRl = ((1 + Rl)/(1 + PI)) - 1")  # 11.9 : Real interest rate on loans
-    model.add("PI = (P - P(-1))/P(-1)")  # 11.10 : Rate of price inflation
-    model.add("Ik = d(Kk) + delta*Kk(-1)")  # 11.11 : Real gross investment
+    # 11.10 : Rate of price inflation. Annualized one-period inflation,
+    # exponentially smoothed over roughly one year so that PI stays comparable
+    # to the yearly model's measure (and does not amplify sub-annual noise).
+    # At dt=1 it reduces exactly to d(P)/P(-1).
+    model.add("PI = dt*((P/P(-1))**(1/dt) - 1) + (1 - dt)*PI(-1)")
+    # 11.11 : Real gross investment. Both the net-accumulation part GRk*Kk and
+    # the depreciation delta*Kk are measured, as in the yearly model, against
+    # the capital stock of one year ago. Writing the net part as GRk*Kk(-1)
+    # backdated (rather than d(Kk)/dt) keeps the annualized investment flow
+    # identical to the yearly model's on a steady growth path; the one-period
+    # difference d(Kk)/dt would exceed it by a factor ~ln(1+GRk)/GRk, and that
+    # bias is amplified ~30x in the loan-financing residual INV - FUf.
+    model.add("Ik = (GRk + delta)*Kk(-1)*(1 + GRk(-1))**(dt - 1)")
     model.add("Sk = Ck + Gk + Ik")  # 11.12 : Actual real sales
     model.add("S = Sk*P")  # 11.13 : Value of realized sales
     model.add("IN = INk*UC")  # 11.14 : Inventories valued at current cost
     model.add("INV = Ik*P")  # 11.15 : Nominal gross investment
     model.add("K = Kk*P")  # 11.16 : Nomincal value of fixed capital
-    model.add("Y = Sk*P + d(INk)*UC")  # 11.17 : Nomincal GDP
+    model.add("Y = Sk*P + (d(INk)/dt)*UC")  # 11.17 : Nomincal GDP
     model.add(
         "omegat = exp(omega0 + omega1*log(PR) + omega2*log(ER + z3*(1 - ER) - z4*BANDt + z5*BANDb))"
     )  # 11.18 : Real wage aspirations
@@ -34,46 +51,70 @@ def add_firms_equations(model: Model) -> None:
     )  # 11.20 : Switch variables
     model.add("z4 = if_true(ER > (1+BANDt))")
     model.add("z5 = if_true(ER < (1-BANDb))")
-    model.add("W - W(-1) = omega3*(omegat*P(-1) - W(-1))")  # 11.21 : Nominal wage
-    model.add("PR = PR(-1)*(1 + GRpr)")  # 11.22 : Labor productivity
+    # 11.21 : Nominal wage. The correction factor on the wage target makes the
+    # steady-state target-to-wage ratio omegat*P/W implied by chasing a growing
+    # target identical to the yearly model's, so that the wage-Phillips
+    # equilibrium is invariant to dt. Wages grow at gw = (1+PI)(1+GRpr)-1 in
+    # steady state while the target price P(-1) trails by one period; equating
+    # the yearly (dt=1) and per-period balance gives the factor below, which
+    # equals 1 exactly when dt=1.
+    model.add(
+        "W - W(-1) = (1 - (1-omega3)**dt)"
+        "*(omegat*P(-1)"
+        "*(1 + (((1 + PI(-1))*(1 + GRpr))**dt - 1)/(1 - (1-omega3)**dt))"
+        "*(1 + GRpr)**(1 - dt)"
+        "/(1 + ((1 + PI(-1))*(1 + GRpr) - 1)/omega3)"
+        " - W(-1))"
+    )
+    model.add("PR = PR(-1)*(1 + GRpr)**dt")  # 11.22 : Labor productivity
     model.add("Nt = Yk/PR")  # 11.23 : Desired employment
-    model.add("N - N(-1) = etan*(Nt - N(-1))")  # 11.24 : Actual employment
+    model.add(
+        "N - N(-1) = (1 - (1-etan)**dt)*(Nt - N(-1))"
+    )  # 11.24 : Actual employment
     model.add("WB = N*W")  # 11.25 : Nominal wage bill
     model.add("UC = WB/Yk")  # 11.26 : Actual unit cost
     model.add("NUC = W/PR")  # 11.27 : Normal unit cost
     model.add(
-        "NHUC = (1 - sigman)*NUC + sigman*(1 + Rln(-1))*NUC(-1)"
+        f"NHUC = (1 - sigman)*NUC + sigman*(1 + Rln(-1))*NUC(-1)*{PRICE_YEAR_AGO}"
     )  # 11.28 : Normal historic unit cost
     model.add("P = (1 + phi)*NHUC")  # 11.29 : Normal-cost pricing
-    model.add("phi - phi(-1) = eps2*(phit(-1) - phi(-1))")  # 11.30 : Actual mark-up
     model.add(
-        "phit = (FDf + FUft + Rl(-1)*(Lfd(-1) - IN(-1)))/((1 - sigmase)*Ske*UC + (1 + Rl(-1))*sigmase*Ske*UC(-1))"
-    )  # 11.31 : Ideal mark-up
+        "phi - phi(-1) = (1 - (1-eps2)**dt)*(phit(-1) - phi(-1))"
+    )  # 11.30 : Actual mark-up
     model.add(
-        "HCe = (1 - sigmase)*Ske*UC + (1 + Rl(-1))*sigmase*Ske*UC(-1)"
+        f"phit = (FDf + FUft + Rl(-1)*(Lfd(-1) - IN(-1))*{NOMINAL_YEAR_AGO})/((1 - sigmase)*Ske*UC + (1 + Rl(-1))*sigmase*Ske*UC(-1)*{PRICE_YEAR_AGO})"
+    )  # 11.31 : Ideal mark-up (interest on loans/inventories of one year ago)
+    model.add(
+        f"HCe = (1 - sigmase)*Ske*UC + (1 + Rl(-1))*sigmase*Ske*UC(-1)*{PRICE_YEAR_AGO}"
     )  # 11.32 : Expected historical costs
     model.add(
-        "sigmase = INk(-1)/Ske"
-    )  # 11.33 : Opening inventories to expected sales ratio
+        f"sigmase = INk(-1)*{REAL_YEAR_AGO}/Ske"
+    )  # 11.33 : Opening (year-ago) inventories to expected sales ratio
     model.add(
-        "Fft = FUft + FDf + Rl(-1)*(Lfd(-1) - IN(-1))"
+        f"Fft = FUft + FDf + Rl(-1)*(Lfd(-1) - IN(-1))*{NOMINAL_YEAR_AGO}"
     )  # 11.34 : Planned entrepeneurial profits of firmss
-    model.add("FUft = psiu*INV(-1)")  # 11.35 : Planned retained earnings of firms
-    model.add("FDf = psid*Ff(-1)")  # 11.36 : Dividends of firms
     model.add(
-        "Ff = S - WB + d(IN) - Rl(-1)*IN(-1)"
+        f"FUft = psiu*INV(-1)*{NOMINAL_YEAR_AGO}"
+    )  # 11.35 : Planned retained earnings of firms
+    model.add(f"FDf = psid*Ff(-1)*{NOMINAL_YEAR_AGO}")  # 11.36 : Dividends of firms
+    model.add(
+        f"Ff = S - WB + d(IN)/dt - Rl(-1)*IN(-1)*{NOMINAL_YEAR_AGO}"
     )  # 11.37 : Realized entrepeneurial profits
     model.add(
-        "FUf = Ff - FDf - Rl(-1)*(Lfd(-1) - IN(-1)) + Rl(-1)*NPL"
+        f"FUf = Ff - FDf - Rl(-1)*(Lfd(-1) - IN(-1))*{NOMINAL_YEAR_AGO} + Rl(-1)*NPL*dt"
     )  # 11.38 : Retained earnings of firms
     model.add(
-        "Lfd - Lfd(-1) = INV + d(IN) - FUf - d(Eks)*Pe - NPL"
+        "Lfd - Lfd(-1) = dt*(INV - FUf - NPL) + d(IN) - d(Eks)*Pe"
     )  # 11.39 : Demand for loans by firms
-    model.add("NPL = NPLk*Lfs(-1)")  # 11.40 : Defaulted loans
     model.add(
-        "Eks - Eks(-1) = ((1 - psiu)*INV(-1))/Pe"
+        f"NPL = NPLk*Lfs(-1)*{NOMINAL_YEAR_AGO}"
+    )  # 11.40 : Defaulted loans (proportion of loans of one year ago)
+    model.add(
+        f"Eks - Eks(-1) = dt*((1 - psiu)*INV(-1)*{NOMINAL_YEAR_AGO})/Pe"
     )  # 11.41 : Supply of equities issued by firms
-    model.add("Rk = FDf/(Pe(-1)*Ekd(-1))")  # 11.42 : Dividend yield of firms
+    model.add(
+        f"Rk = FDf/(Pe(-1)*Ekd(-1)*{NOMINAL_YEAR_AGO})"
+    )  # 11.42 : Dividend yield of firms
     model.add("PE = Pe/(Ff/Eks(-1))")  # 11.43 : Price earnings ratio
     model.add("Q = (Eks*Pe + Lfd)/(K + IN)")  # 11.44 : Tobin's Q ratio
 

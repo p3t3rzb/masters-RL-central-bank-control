@@ -1,8 +1,12 @@
 from pysolve.model import Model
 
+from src.modules.firms import NOMINAL_YEAR_AGO
+
 
 def add_central_bank_equations(model: Model) -> None:
-    model.add("Fcb = Rb(-1)*Bcbd(-1)")  # 11.76 : Central bank profits
+    model.add(
+        f"Fcb = Rb(-1)*Bcbd(-1)*{NOMINAL_YEAR_AGO}"
+    )  # 11.76 : Central bank profits (interest on bills of one year ago)
     model.add("BLs = BLd")  # 11.77 : Bonds are supplied on demand
     model.add("Bhs = Bhd")  # 11.78 : Household bills supplied on demand
     model.add("Hhs = Hhd")  # 11.79 : Cash supplied on demand

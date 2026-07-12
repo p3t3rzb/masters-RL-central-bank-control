@@ -1,5 +1,7 @@
 from pysolve.model import Model
 
+from src.modules.firms import NOMINAL_YEAR_AGO
+
 
 def add_commercial_banks_equations(model: Model) -> None:
     model.add("Ms = Md")  # 11.87 : Bank deposits supplied on demand
@@ -14,7 +16,7 @@ def add_commercial_banks_equations(model: Model) -> None:
     )  # 11.92 : Balance sheet constraint of banks
     model.add("BLR = Bbd/Ms")  # 11.93 : Bank liquidity ratio
     model.add(
-        "Rm - Rm(-1) = z1a*xim1 + z1b*xim2 - z2a*xim1 - z2b*xim2"
+        "Rm - Rm(-1) = dt*(z1a*xim1 + z1b*xim2 - z2a*xim1 - z2b*xim2)"
     )  # 11.94 : Deposit interest rate
     model.add(
         "z2a = if_true(BLR(-1) > (top + .05))"
@@ -23,28 +25,41 @@ def add_commercial_banks_equations(model: Model) -> None:
     model.add("z1a = if_true(BLR(-1) <= bot)")
     model.add("z1b = if_true(BLR(-1) <= (bot -.05))")
     model.add("Rl = Rm + ADDl")  # 11.98 : Loan interest rate
-    model.add("OFbt = NCAR*(Lfs(-1) + Lhs(-1))")  # 11.99 : Long-run own funds target
     model.add(
-        "OFbe = OFb(-1) + betab*(OFbt - OFb(-1))"
-    )  # 11.100 : Short-run own funds target
+        f"OFbt = NCAR*(Lfs(-1) + Lhs(-1))*{NOMINAL_YEAR_AGO}"
+    )  # 11.99 : Long-run own funds target (based on loans of one year ago)
+    # 11.100 : Short-run own funds target. As in the inventory-target equation,
+    # the correction factor on OFbt makes the steady-state own-funds-to-target
+    # ratio implied by chasing a target growing at the nominal rate
+    # (1+GRk(-1))*(1+PI(-1)) - 1 identical to the yearly model's, so the
+    # equilibrium capital adequacy ratio is invariant to dt. It is 1 at dt = 1.
     model.add(
-        "FUbt = OFbe - OFb(-1) + NPLke*Lfs(-1)"
+        "OFbe = OFb(-1) + (1 - (1-betab)**dt)*(OFbt"
+        "*(betab*(1 + GRk(-1))*(1 + PI(-1))/((1 + GRk(-1))*(1 + PI(-1)) - 1 + betab))"
+        "*((((1 + GRk(-1))*(1 + PI(-1)))**dt - 1 + (1 - (1-betab)**dt))"
+        "/((1 - (1-betab)**dt)*((1 + GRk(-1))*(1 + PI(-1)))**dt))"
+        " - OFb(-1))"
+    )
+    model.add(
+        f"FUbt = (OFbe - OFb(-1))/dt + NPLke*Lfs(-1)*{NOMINAL_YEAR_AGO}"
     )  # 11.101 : Target retained earnings of banks
     model.add(
-        "NPLke = epsb*NPLke(-1) + (1 - epsb)*NPLk(-1)"
+        "NPLke = epsb**dt*NPLke(-1) + (1 - epsb**dt)*NPLk(-1)"
     )  # 11.102 : Expected proportion of non-performaing loans
     model.add("FDb = Fb - FUb")  # 11.103 : Dividends of banks
     model.add(
-        "Fbt = lambdab*Y(-1) + (OFbe - OFb(-1) + NPLke*Lfs(-1))"
+        f"Fbt = lambdab*Y(-1)*{NOMINAL_YEAR_AGO} + ((OFbe - OFb(-1))/dt + NPLke*Lfs(-1)*{NOMINAL_YEAR_AGO})"
     )  # 11.104 : Target profits of banks
     model.add(
-        "Fb = Rl(-1)*(Lfs(-1) + Lhs(-1) - NPL) + Rb(-1)*Bbd(-1) - Rm(-1)*Ms(-1)"
-    )  # 11.105 : Actual profits of banks
+        f"Fb = Rl(-1)*((Lfs(-1) + Lhs(-1))*{NOMINAL_YEAR_AGO} - NPL*dt) + (Rb(-1)*Bbd(-1) - Rm(-1)*Ms(-1))*{NOMINAL_YEAR_AGO}"
+    )  # 11.105 : Actual profits of banks (interest on stocks of one year ago)
     model.add(
-        "ADDl = (Fbt - Rb(-1)*Bbd(-1) + Rm*(Ms(-1) - (1 - NPLke)*Lfs(-1) - Lhs(-1)))/((1 - NPLke)*Lfs(-1) + Lhs(-1))"
+        f"ADDl = (Fbt - Rb(-1)*Bbd(-1)*{NOMINAL_YEAR_AGO} + Rm*(Ms(-1) - (1 - NPLke*dt)*Lfs(-1) - Lhs(-1))*{NOMINAL_YEAR_AGO})/(((1 - NPLke*dt)*Lfs(-1) + Lhs(-1))*{NOMINAL_YEAR_AGO})"
     )  # 11.106 : Lending mark-up over deposit rate
-    model.add("FUb = Fb - lambdab*Y(-1)")  # 11.107 : Actual retained earnings
-    model.add("OFb - OFb(-1) = FUb - NPL")  # 11.108 : Own funds of banks
+    model.add(
+        f"FUb = Fb - lambdab*Y(-1)*{NOMINAL_YEAR_AGO}"
+    )  # 11.107 : Actual retained earnings
+    model.add("OFb - OFb(-1) = dt*(FUb - NPL)")  # 11.108 : Own funds of banks
     model.add("CAR = OFb/(Lfs + Lhs)")  # 11.109 : Actual capital capacity ratio
 
 
