@@ -1,6 +1,6 @@
 from pysolve.model import Model
 
-from src.modules.firms import NOMINAL_YEAR_AGO
+from src.economic_models.growth.modules.firms import NOMINAL_YEAR_AGO
 
 
 def add_government_equations(model: Model) -> None:
@@ -16,7 +16,7 @@ def add_government_equations(model: Model) -> None:
 
 
 def add_government_params(model: Model) -> None:
-    model.param("GRg", desc="growth_mod of real government expenditures")
+    model.param("GRg", desc="Growth of real government expenditures")
 
 
 def add_government_variables(model: Model) -> None:

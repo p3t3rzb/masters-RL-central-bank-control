@@ -1,12 +1,11 @@
 from pysolve.model import Model
 
-from src.modules.firms import NOMINAL_YEAR_AGO
+from src.economic_models.growth.modules.firms import NOMINAL_YEAR_AGO
 
 
 def add_households_equations(model: Model) -> None:
-    # Interest and coupon flows are paid on the stocks of one year ago, as in
-    # the yearly model where the one-period lag spans a full year; with dt < 1
-    # the lagged stocks are backdated to their year-ago equivalents.
+    # Interest and coupon flows accrue on the stocks of one year ago; with
+    # dt < 1 the one-period lag is backdated to its year-ago equivalent.
     model.add(
         f"YP = WB + FDf + FDb + (Rm(-1)*Md(-1) + Rb(-1)*Bhd(-1) + BLs(-1))*{NOMINAL_YEAR_AGO}"
     )  # 11.45 : Personal income
@@ -21,7 +20,7 @@ def add_households_equations(model: Model) -> None:
     model.add(
         "V - V(-1) = dt*(YDr - CONS) + d(Pe)*Ekd(-1) + d(Pbl)*BLs(-1) + d(OFb)"
     )  # 11.50 : Wealth
-    model.add("Vk = V/P")  # 11.51 : Real staock of wealth
+    model.add("Vk = V/P")  # 11.51 : Real stock of wealth
     model.add("CONS = Ck*P")  # 11.52 : Consumption
     model.add(
         "Ck = alpha1*(YDkre + NLk) + alpha2*Vk(-1)*(1 + GRk(-1))**(dt - 1)"
@@ -30,9 +29,7 @@ def add_households_equations(model: Model) -> None:
         "YDkre = (1 - (1-eps)**dt)*YDkr + (1-eps)**dt*YDkr(-1)*(1 + GRpr)**dt"
     )  # 11.54 : Expected real regular disposable income
     # 11.55 : Real regular disposable income. The inflation loss on wealth uses
-    # the smoothed annual inflation rate PI (equal to d(P)/P(-1) when dt=1)
-    # instead of the raw one-period price change, which for dt < 1 would
-    # amplify sub-annual price noise by 1/dt.
+    # the smoothed annual inflation rate PI (equal to d(P)/P(-1) when dt=1).
     model.add(f"YDkr = YDr/P - PI*P(-1)*Vk(-1)*{NOMINAL_YEAR_AGO}/P")
     model.add("GL = eta*YDr")  # 11.56 : Gross amount of new personal loans
     model.add("eta = eta0 - etar*RRl")  # 11.57 : New loans to personal income ratio

@@ -23,25 +23,18 @@ def add_firms_equations(model: Model) -> None:
         "U = Yk/(Kk(-1)*(1 + GRk(-1))**(dt - 1))"
     )  # 11.8 : Capital utilization proxy (relative to capital one year ago)
     model.add("RRl = ((1 + Rl)/(1 + PI)) - 1")  # 11.9 : Real interest rate on loans
-    # 11.10 : Rate of price inflation. Annualized one-period inflation,
-    # exponentially smoothed over roughly one year so that PI stays comparable
-    # to the yearly model's measure (and does not amplify sub-annual noise).
-    # At dt=1 it reduces exactly to d(P)/P(-1).
+    # 11.10 : Price inflation -- the one-period price change annualized and
+    # exponentially smoothed over roughly one year. Reduces to d(P)/P(-1) at dt=1.
     model.add("PI = dt*((P/P(-1))**(1/dt) - 1) + (1 - dt)*PI(-1)")
-    # 11.11 : Real gross investment. Both the net-accumulation part GRk*Kk and
-    # the depreciation delta*Kk are measured, as in the yearly model, against
-    # the capital stock of one year ago. Writing the net part as GRk*Kk(-1)
-    # backdated (rather than d(Kk)/dt) keeps the annualized investment flow
-    # identical to the yearly model's on a steady growth path; the one-period
-    # difference d(Kk)/dt would exceed it by a factor ~ln(1+GRk)/GRk, and that
-    # bias is amplified ~30x in the loan-financing residual INV - FUf.
+    # 11.11 : Real gross investment (net accumulation GRk*Kk plus depreciation
+    # delta*Kk), both measured against the capital stock of one year ago.
     model.add("Ik = (GRk + delta)*Kk(-1)*(1 + GRk(-1))**(dt - 1)")
     model.add("Sk = Ck + Gk + Ik")  # 11.12 : Actual real sales
     model.add("S = Sk*P")  # 11.13 : Value of realized sales
     model.add("IN = INk*UC")  # 11.14 : Inventories valued at current cost
     model.add("INV = Ik*P")  # 11.15 : Nominal gross investment
-    model.add("K = Kk*P")  # 11.16 : Nomincal value of fixed capital
-    model.add("Y = Sk*P + (d(INk)/dt)*UC")  # 11.17 : Nomincal GDP
+    model.add("K = Kk*P")  # 11.16 : Nominal value of fixed capital
+    model.add("Y = Sk*P + (d(INk)/dt)*UC")  # 11.17 : Nominal GDP
     model.add(
         "omegat = exp(omega0 + omega1*log(PR) + omega2*log(ER + z3*(1 - ER) - z4*BANDt + z5*BANDb))"
     )  # 11.18 : Real wage aspirations
@@ -51,13 +44,10 @@ def add_firms_equations(model: Model) -> None:
     )  # 11.20 : Switch variables
     model.add("z4 = if_true(ER > (1+BANDt))")
     model.add("z5 = if_true(ER < (1-BANDb))")
-    # 11.21 : Nominal wage. The correction factor on the wage target makes the
-    # steady-state target-to-wage ratio omegat*P/W implied by chasing a growing
-    # target identical to the yearly model's, so that the wage-Phillips
-    # equilibrium is invariant to dt. Wages grow at gw = (1+PI)(1+GRpr)-1 in
-    # steady state while the target price P(-1) trails by one period; equating
-    # the yearly (dt=1) and per-period balance gives the factor below, which
-    # equals 1 exactly when dt=1.
+    # 11.21 : Nominal wage, adjusting toward the real-wage target omegat. The
+    # correction factor on the target keeps the steady-state target-to-wage
+    # ratio omegat*P/W (and hence the wage-Phillips equilibrium) independent of
+    # dt; it equals 1 at dt=1.
     model.add(
         "W - W(-1) = (1 - (1-omega3)**dt)"
         "*(omegat*P(-1)"
@@ -92,14 +82,14 @@ def add_firms_equations(model: Model) -> None:
     )  # 11.33 : Opening (year-ago) inventories to expected sales ratio
     model.add(
         f"Fft = FUft + FDf + Rl(-1)*(Lfd(-1) - IN(-1))*{NOMINAL_YEAR_AGO}"
-    )  # 11.34 : Planned entrepeneurial profits of firmss
+    )  # 11.34 : Planned entrepreneurial profits of firms
     model.add(
         f"FUft = psiu*INV(-1)*{NOMINAL_YEAR_AGO}"
     )  # 11.35 : Planned retained earnings of firms
     model.add(f"FDf = psid*Ff(-1)*{NOMINAL_YEAR_AGO}")  # 11.36 : Dividends of firms
     model.add(
         f"Ff = S - WB + d(IN)/dt - Rl(-1)*IN(-1)*{NOMINAL_YEAR_AGO}"
-    )  # 11.37 : Realized entrepeneurial profits
+    )  # 11.37 : Realized entrepreneurial profits
     model.add(
         f"FUf = Ff - FDf - Rl(-1)*(Lfd(-1) - IN(-1))*{NOMINAL_YEAR_AGO} + Rl(-1)*NPL*dt"
     )  # 11.38 : Retained earnings of firms
@@ -127,14 +117,14 @@ def add_firms_params(model: Model) -> None:
         "etan", desc="Speed of adjustment of actual employment to desired employment"
     )
     model.param("gamma", desc="Speed of adjustment of inventories to the target level")
-    model.param("gamma0", desc="Exogenous growth_mod in the real stock of capital")
+    model.param("gamma0", desc="Exogenous growth in the real stock of capital")
     model.param(
         "gammar",
-        desc="Relation between the real interest rate and growth_mod in the stock of capital",
+        desc="Relation between the real interest rate and growth in the stock of capital",
     )
     model.param(
         "gammau",
-        desc="Relation between the utilization rate and growth_mod in the stock of capital",
+        desc="Relation between the utilization rate and growth in the stock of capital",
     )
     model.param("psid", desc="Ratio of dividends to gross profits")
     model.param("psiu", desc="Ratio of retained earnings to investments")
@@ -147,7 +137,7 @@ def add_firms_params(model: Model) -> None:
     model.param("omega3", desc="Speed of adjustment of wages to target value")
     model.param("BANDb", desc="Lower range of the flat Phillips curve")
     model.param("BANDt", desc="Upper range of the flat Phillips curve")
-    model.param("GRpr", desc="growth_mod rate of productivity")
+    model.param("GRpr", desc="Growth rate of productivity")
     model.param("Nfe", desc="Full employment level")
     model.param("NPLk", desc="Proportion of Non-Performing loans")
     model.param("RA", desc="Random shock to expectations on real sales")
@@ -162,7 +152,7 @@ def add_firms_variables(model: Model) -> None:
     model.var("FDf", desc="Dividends of firms")
     model.var("FUf", desc="Retained earnings of firms")
     model.var("FUft", desc="Planned retained earnings of firms")
-    model.var("GRk", desc="growth_mod of real capital stock")
+    model.var("GRk", desc="Growth of real capital stock")
     model.var("HCe", desc="Expected historical costs")
     model.var("INV", desc="Gross investment")
     model.var("Ik", desc="Gross investment in real terms")
@@ -182,7 +172,7 @@ def add_firms_variables(model: Model) -> None:
     model.var("P", desc="Price level")
     model.var("PE", desc="Price earnings ratio")
     model.var("PI", desc="Price inflation")
-    model.var("PR", desc="Lobor productivity")
+    model.var("PR", desc="Labor productivity")
     model.var("Q", desc="Tobin's Q")
     model.var("Rk", desc="Dividend yield of firms")
     model.var("RRl", desc="Real interest rate on loans")

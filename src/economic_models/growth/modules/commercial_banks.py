@@ -1,6 +1,6 @@
 from pysolve.model import Model
 
-from src.modules.firms import NOMINAL_YEAR_AGO
+from src.economic_models.growth.modules.firms import NOMINAL_YEAR_AGO
 
 
 def add_commercial_banks_equations(model: Model) -> None:
@@ -28,11 +28,10 @@ def add_commercial_banks_equations(model: Model) -> None:
     model.add(
         f"OFbt = NCAR*(Lfs(-1) + Lhs(-1))*{NOMINAL_YEAR_AGO}"
     )  # 11.99 : Long-run own funds target (based on loans of one year ago)
-    # 11.100 : Short-run own funds target. As in the inventory-target equation,
-    # the correction factor on OFbt makes the steady-state own-funds-to-target
-    # ratio implied by chasing a target growing at the nominal rate
-    # (1+GRk(-1))*(1+PI(-1)) - 1 identical to the yearly model's, so the
-    # equilibrium capital adequacy ratio is invariant to dt. It is 1 at dt = 1.
+    # 11.100 : Short-run own funds target, adjusting toward OFbt. The correction
+    # factor on OFbt keeps the steady-state capital adequacy ratio independent of
+    # dt (OFbt grows at the nominal rate (1+GRk(-1))*(1+PI(-1)) - 1); it equals 1
+    # at dt=1.
     model.add(
         "OFbe = OFb(-1) + (1 - (1-betab)**dt)*(OFbt"
         "*(betab*(1 + GRk(-1))*(1 + PI(-1))/((1 + GRk(-1))*(1 + PI(-1)) - 1 + betab))"
@@ -45,7 +44,7 @@ def add_commercial_banks_equations(model: Model) -> None:
     )  # 11.101 : Target retained earnings of banks
     model.add(
         "NPLke = epsb**dt*NPLke(-1) + (1 - epsb**dt)*NPLk(-1)"
-    )  # 11.102 : Expected proportion of non-performaing loans
+    )  # 11.102 : Expected proportion of non-performing loans
     model.add("FDb = Fb - FUb")  # 11.103 : Dividends of banks
     model.add(
         f"Fbt = lambdab*Y(-1)*{NOMINAL_YEAR_AGO} + ((OFbe - OFb(-1))/dt + NPLke*Lfs(-1)*{NOMINAL_YEAR_AGO})"
@@ -60,11 +59,11 @@ def add_commercial_banks_equations(model: Model) -> None:
         f"FUb = Fb - lambdab*Y(-1)*{NOMINAL_YEAR_AGO}"
     )  # 11.107 : Actual retained earnings
     model.add("OFb - OFb(-1) = dt*(FUb - NPL)")  # 11.108 : Own funds of banks
-    model.add("CAR = OFb/(Lfs + Lhs)")  # 11.109 : Actual capital capacity ratio
+    model.add("CAR = OFb/(Lfs + Lhs)")  # 11.109 : Actual capital adequacy ratio
 
 
 def add_commercial_banks_params(model: Model) -> None:
-    model.param("betab", desc="Spped of adjustment of banks own funds")
+    model.param("betab", desc="Speed of adjustment of banks own funds")
     model.param("bot", desc="Bottom value for bank net liquidity ratio")
     model.param("epsb", desc="Speed of adjustment in expected proportion of non-performing loans")
     model.param("lambdab", desc="Parameter determining dividends of banks")
@@ -85,7 +84,7 @@ def add_commercial_banks_variables(model: Model) -> None:
     model.var("Fbt", desc="Target profits of banks")
     model.var("FDb", desc="Dividends of banks")
     model.var("FUb", desc="Retained earnings of banks")
-    model.var("FUbt", desc="Targt retained earnings of banks")
+    model.var("FUbt", desc="Target retained earnings of banks")
     model.var("Hbd", desc="Cash required by banks")
     model.var("Lfs", desc="Supply of loans to firms")
     model.var("Lhs", desc="Loans supplied to households")

@@ -1,6 +1,6 @@
 from pysolve.model import Model
 
-from src.modules.firms import NOMINAL_YEAR_AGO
+from src.economic_models.growth.modules.firms import NOMINAL_YEAR_AGO
 
 
 def add_central_bank_equations(model: Model) -> None:
@@ -12,7 +12,7 @@ def add_central_bank_equations(model: Model) -> None:
     model.add("Hhs = Hhd")  # 11.79 : Cash supplied on demand
     model.add("Hbs = Hbd")  # 11.80 : Reserves supplied on demand
     model.add("Hs = Hbs + Hhs")  # 11.81 : Total supply of cash
-    model.add("Bcbd = Hs")  # 11.82 : Central bankd
+    model.add("Bcbd = Hs")  # 11.82 : Central bank demand for bills
     model.add("Bcbs = Bcbd")  # 11.83 : Supply of bills to Central bank
     model.add("Rb = Rbbar")  # 11.84 : Interest rate on bills set exogenously
     model.add("Rbl = Rb + ADDbl")  # 11.85 : Long term interest rate
