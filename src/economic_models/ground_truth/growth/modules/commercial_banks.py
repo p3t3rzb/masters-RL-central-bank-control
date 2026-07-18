@@ -1,9 +1,21 @@
+"""Commercial banks sector of the GROWTH model (Godley & Lavoie, ch. 11).
+
+Registers the banking block: equations 11.87-11.109 (deposit and loan supply,
+reserve requirements, the bank liquidity ratio and the band mechanism setting
+the deposit rate, own-funds and capital-adequacy targets, bank profits,
+dividends and the lending mark-up).
+"""
+
 from pysolve.model import Model
 
-from src.economic_models.growth.modules.firms import NOMINAL_YEAR_AGO
+from economic_models.ground_truth.growth.modules.conventions import NOMINAL_YEAR_AGO
+from economic_models.variables import Actions, Parameters, State
+
+_DESC = {**State.describe(), **Parameters.describe(), **Actions.describe()}
 
 
 def add_commercial_banks_equations(model: Model) -> None:
+    """Register the commercial banks equations 11.87-11.109 onto ``model``."""
     model.add("Ms = Md")  # 11.87 : Bank deposits supplied on demand
     model.add("Lfs = Lfd")  # 11.88 : Loans to firms supplied on demand
     model.add("Lhs = Lhd")  # 11.89 : Personal loans supplied on demand
@@ -19,11 +31,11 @@ def add_commercial_banks_equations(model: Model) -> None:
         "Rm - Rm(-1) = dt*(z1a*xim1 + z1b*xim2 - z2a*xim1 - z2b*xim2)"
     )  # 11.94 : Deposit interest rate
     model.add(
-        "z2a = if_true(BLR(-1) > (top + .05))"
+        "z2a = if_true(BLR(-1) > (top + BANDlr))"
     )  # 11.95-97 : Mechanism for determining changes to the interest rate on deposits
     model.add("z2b = if_true(BLR(-1) > top)")
     model.add("z1a = if_true(BLR(-1) <= bot)")
-    model.add("z1b = if_true(BLR(-1) <= (bot -.05))")
+    model.add("z1b = if_true(BLR(-1) <= (bot - BANDlr))")
     model.add("Rl = Rm + ADDl")  # 11.98 : Loan interest rate
     model.add(
         f"OFbt = NCAR*(Lfs(-1) + Lhs(-1))*{NOMINAL_YEAR_AGO}"
@@ -63,18 +75,21 @@ def add_commercial_banks_equations(model: Model) -> None:
 
 
 def add_commercial_banks_params(model: Model) -> None:
+    """Register the commercial banks' exogenous parameters onto ``model``."""
+    model.param("BANDlr", desc="Outer offset on the bank liquidity ratio band (top/bot)")
     model.param("betab", desc="Speed of adjustment of banks own funds")
     model.param("bot", desc="Bottom value for bank net liquidity ratio")
     model.param("epsb", desc="Speed of adjustment in expected proportion of non-performing loans")
     model.param("lambdab", desc="Parameter determining dividends of banks")
-    model.param("NCAR", desc="Normal capital adequacy ratio of banks")
-    model.param("ro", desc="Reserve requirement parameter")
+    model.param("NCAR", desc=_DESC["NCAR"])
+    model.param("ro", desc=_DESC["ro"])
     model.param("top", desc="Top value for bank net liquidity ratio")
     model.param("xim1", desc="Parameter in the equation for setting interest rate on deposits")
     model.param("xim2", desc="Parameter in the equation for setting interest rate on deposits")
 
 
 def add_commercial_banks_variables(model: Model) -> None:
+    """Register the commercial banks' endogenous variables onto ``model``."""
     model.var("ADDl", desc="Spread between interest rate on loans and rate on deposits")
     model.var("Bbd", desc="Government bills demanded by commercial banks")
     model.var("Bbs", desc="Government bills supplied to commercial banks")
@@ -93,8 +108,8 @@ def add_commercial_banks_variables(model: Model) -> None:
     model.var("OFb", desc="Own funds of banks")
     model.var("OFbe", desc="Short-run target for banks own funds")
     model.var("OFbt", desc="Long-run target for banks own funds")
-    model.var("Rl", desc="Interest rate on loans")
-    model.var("Rm", desc="Interest rate on deposits")
+    model.var("Rl", desc=_DESC["Rl"])
+    model.var("Rm", desc=_DESC["Rm"])
     model.var("z1a", desc="Is one if bank liquidity ratio is below bottom range")
     model.var("z1b", desc="Is one if bank liquidity ratio is below bottom range")
     model.var("z2a", desc="Is one if bank liquidity ratio is above top range")

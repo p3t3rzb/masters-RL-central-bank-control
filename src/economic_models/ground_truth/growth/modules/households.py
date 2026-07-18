@@ -1,9 +1,22 @@
+"""Households sector of the GROWTH model (Godley & Lavoie, ch. 11).
+
+Registers the household income, consumption, personal-credit and portfolio
+block: equations 11.45-11.70 (personal income and taxes, disposable income and
+capital gains, wealth, consumption, new personal loans and the debt burden,
+and the Tobinesque portfolio demands for bills, bonds, equities, deposits and
+cash).
+"""
+
 from pysolve.model import Model
 
-from src.economic_models.growth.modules.firms import NOMINAL_YEAR_AGO
+from economic_models.ground_truth.growth.modules.conventions import NOMINAL_YEAR_AGO
+from economic_models.variables import Parameters, State
+
+_DESC = {**State.describe(), **Parameters.describe()}
 
 
 def add_households_equations(model: Model) -> None:
+    """Register the household equations 11.45-11.70 onto ``model``."""
     # Interest and coupon flows accrue on the stocks of one year ago; with
     # dt < 1 the one-period lag is backdated to its year-ago equivalent.
     model.add(
@@ -60,6 +73,7 @@ def add_households_equations(model: Model) -> None:
 
 
 def add_households_params(model: Model) -> None:
+    """Register the households' exogenous parameters onto ``model``."""
     model.param("alpha1", desc="Propensity to consume out of income")
     model.param("alpha2", desc="Propensity to consume out of wealth")
     model.param("deltarep", desc="Ratio of personal loans repayments to stock of loans")
@@ -92,14 +106,15 @@ def add_households_params(model: Model) -> None:
     model.param("lambda44", desc="Parameter in households demand for equities")
     model.param("lambda45", desc="Parameter in households demand for equities")
     model.param("lambdac", desc="Parameter in households demand for cash")
-    model.param("theta", desc="Income tax rate")
+    model.param("theta", desc=_DESC["theta"])
 
 
 def add_households_variables(model: Model) -> None:
+    """Register the households' endogenous variables onto ``model``."""
     model.var("Bhd", desc="Demand for government bills from households")
     model.var("BLd", desc="Demand for government bonds")
     model.var("BUR", desc="Burden of personal debt")
-    model.var("Ck", desc="Real consumption")
+    model.var("Ck", desc=_DESC["Ck"])
     model.var("CG", desc="Capital gains on government bonds")
     model.var("CONS", desc="Consumption at current prices")
     model.var("Ekd", desc="Number of equities demanded")
@@ -114,7 +129,7 @@ def add_households_variables(model: Model) -> None:
     model.var("REP", desc="Personal loans repayments")
     model.var("T", desc="Taxes")
     model.var("V", desc="Wealth of households")
-    model.var("Vk", desc="Real wealth of households")
+    model.var("Vk", desc=_DESC["Vk"])
     model.var("Vfma", desc="Investible wealth of households")
     model.var("YDhs", desc="Haig-Simons measure of disposable income")
     model.var("YDr", desc="Regular disposable income")

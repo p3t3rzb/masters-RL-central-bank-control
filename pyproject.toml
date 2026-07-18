@@ -1,11 +1,26 @@
 [project]
 name = "masters-godley"
 version = "0.1.0"
-description = "Add your description here"
+description = "SFC ground-truth economic models and learned proxy surrogates (master's thesis)"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "jupyter>=1.1.1",
     "matplotlib>=3.10.9",
+    "numpy>=2.0",
     "pysolve>=0.2.0",
+    "scikit-learn>=1.9.0",
+    "torch>=2.13.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/economic_models"]

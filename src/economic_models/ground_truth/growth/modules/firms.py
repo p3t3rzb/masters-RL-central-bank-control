@@ -1,11 +1,25 @@
+"""Firms sector of the GROWTH model (Godley & Lavoie, ch. 11).
+
+Registers the production, pricing, employment/wage and firm-finance block:
+equations 11.1-11.44 (output, sales expectations, inventories, capital
+accumulation, inflation, the wage-Phillips machinery, mark-up pricing, firm
+profits, loans and equity issuance).
+"""
+
 from pysolve.model import Model
 
-NOMINAL_YEAR_AGO = "((1 + GRk(-1))*(1 + PI(-1)))**(dt - 1)"  # nominal stocks/flows
-PRICE_YEAR_AGO = "(1 + PI(-1))**(dt - 1)"  # prices/unit costs
-REAL_YEAR_AGO = "(1 + GRk(-1))**(dt - 1)"  # real stocks
+from economic_models.ground_truth.growth.modules.conventions import (
+    NOMINAL_YEAR_AGO,
+    PRICE_YEAR_AGO,
+    REAL_YEAR_AGO,
+)
+from economic_models.variables import Parameters, State
+
+_DESC = {**State.describe(), **Parameters.describe()}
 
 
 def add_firms_equations(model: Model) -> None:
+    """Register the firms equations 11.1-11.44 onto ``model``."""
     model.add("Yk = Ske + (INke - INk(-1))/dt")  # 11.1 : Real output
     model.add(
         "Ske = (1 - (1-beta)**dt)*Sk + (1-beta)**dt*Sk(-1)*(1 + (GRpr + RA))**dt"
@@ -110,6 +124,7 @@ def add_firms_equations(model: Model) -> None:
 
 
 def add_firms_params(model: Model) -> None:
+    """Register the firms' exogenous parameters onto ``model``."""
     model.param("beta", desc="Parameter in expectation formations on real sales")
     model.param("delta", desc="Rate of depreciation of fixed capital")
     model.param("eps2", desc="Speed of adjustment of mark-up")
@@ -129,7 +144,6 @@ def add_firms_params(model: Model) -> None:
     model.param("psid", desc="Ratio of dividends to gross profits")
     model.param("psiu", desc="Ratio of retained earnings to investments")
     model.param("sigman", desc="Parameter of influencing normal historic unit costs")
-    model.param("sigmas", desc="Realized inventories to sales ratio")
     model.param("sigmat", desc="Target inventories to sales ratio")
     model.param("omega0", desc="Parameter influencing the target real wage for workers")
     model.param("omega1", desc="Parameter influencing the target real wage for workers")
@@ -137,16 +151,17 @@ def add_firms_params(model: Model) -> None:
     model.param("omega3", desc="Speed of adjustment of wages to target value")
     model.param("BANDb", desc="Lower range of the flat Phillips curve")
     model.param("BANDt", desc="Upper range of the flat Phillips curve")
-    model.param("GRpr", desc="Growth rate of productivity")
-    model.param("Nfe", desc="Full employment level")
-    model.param("NPLk", desc="Proportion of Non-Performing loans")
+    model.param("GRpr", desc=_DESC["GRpr"])
+    model.param("Nfe", desc=_DESC["Nfe"])
+    model.param("NPLk", desc=_DESC["NPLk"])
     model.param("RA", desc="Random shock to expectations on real sales")
-    model.param("Rln", desc="Normal interest rate on loans")
+    model.param("Rln", desc=_DESC["Rln"])
 
 
 def add_firms_variables(model: Model) -> None:
+    """Register the firms' endogenous variables onto ``model``."""
     model.var("Eks", desc="Number of equities supplied by firms")
-    model.var("ER", desc="Employment rate")
+    model.var("ER", desc=_DESC["ER"])
     model.var("Ff", desc="Realized entrepreneurial profits")
     model.var("Fft", desc="Planned entrepreneurial profits")
     model.var("FDf", desc="Dividends of firms")
@@ -155,7 +170,7 @@ def add_firms_variables(model: Model) -> None:
     model.var("GRk", desc="Growth of real capital stock")
     model.var("HCe", desc="Expected historical costs")
     model.var("INV", desc="Gross investment")
-    model.var("Ik", desc="Gross investment in real terms")
+    model.var("Ik", desc=_DESC["Ik"])
     model.var("IN", desc="Stock of inventories at current costs")
     model.var("INk", desc="Real inventories")
     model.var("INke", desc="Expected real inventories")
@@ -169,11 +184,11 @@ def add_firms_variables(model: Model) -> None:
     model.var("NPL", desc="Non-Performing loans")
     model.var("NUC", desc="Normal unit cost")
     model.var("omegat", desc="Target real wage for workers")
-    model.var("P", desc="Price level")
-    model.var("PE", desc="Price earnings ratio")
-    model.var("PI", desc="Price inflation")
+    model.var("P", desc=_DESC["P"])
+    model.var("PE", desc=_DESC["PE"])
+    model.var("PI", desc=_DESC["PI"])
     model.var("PR", desc="Labor productivity")
-    model.var("Q", desc="Tobin's Q")
+    model.var("Q", desc=_DESC["Q"])
     model.var("Rk", desc="Dividend yield of firms")
     model.var("RRl", desc="Real interest rate on loans")
     model.var("S", desc="Sales at current prices")
@@ -183,8 +198,8 @@ def add_firms_variables(model: Model) -> None:
     model.var("UC", desc="Unit costs")
     model.var("W", desc="Wage rate")
     model.var("WB", desc="The wage bill")
-    model.var("Y", desc="Output at current prices (nominal GDP)")
-    model.var("Yk", desc="Real output")
+    model.var("Y", desc=_DESC["Y"])
+    model.var("Yk", desc=_DESC["Yk"])
     model.var("phi", desc="Mark-up on unit costs")
     model.var("phit", desc="Ideal mark-up on unit costs")
     model.var("z3", desc="Parameter in wage aspiration equation")

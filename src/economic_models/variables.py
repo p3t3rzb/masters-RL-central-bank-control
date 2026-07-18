@@ -1,29 +1,22 @@
-"""The central-bank-visible interface of an economic model, as whole-state objects.
-
-Everything the bank can see or touch is grouped into three frozen value classes,
-each holding *all* of its fields at once rather than a loose dict of names:
+"""The central-bank-visible interface, as three frozen whole-state value classes.
 
 * :class:`State`      -- the endogenous macro observables (GDP, inflation, ...).
 * :class:`Parameters` -- the exogenous levers the bank observes but does **not**
   control (fiscal stance, productivity growth, loan spreads, ...).
-* :class:`Actions`    -- the three levers the central bank actually controls
-  (policy rate, capital requirement, reserve requirement).
+* :class:`Actions`    -- the three levers the central bank controls (policy
+  rate, capital requirement, reserve requirement).
 
-The split between ``Parameters`` and ``Actions`` is the whole point: a scenario
-can be written as a ``(State, list[Parameters])`` tuple -- an initial state plus
-the exogenous parameters as they change over time, *without* actions -- and
-replayed against any model, while a policy/agent supplies the ``Actions`` at run
-time.
-
-These objects only *name and carry values for* already-registered model
-quantities; they do not touch the underlying solver. Hidden internals of a model
-need no class here -- they are registered and owned by the concrete model itself.
+Splitting ``Parameters`` from ``Actions`` lets a scenario be written as an
+initial ``State`` plus the exogenous ``Parameters`` over time -- without actions
+-- and replayed against any model, while a policy supplies the ``Actions`` at
+run time. These objects only carry values for already-registered model
+quantities; a model's hidden internals are owned by the concrete model itself.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
-from typing import Mapping, TypeVar
+from dataclasses import Field, dataclass, field, fields
+from typing import Any, ClassVar, Mapping, TypeVar
 
 T = TypeVar("T", bound="ValueSpace")
 
@@ -40,6 +33,11 @@ class ValueSpace:
     This mixin adds conversion to/from the flat ``{name: value}`` dicts that
     :mod:`pysolve` speaks, plus introspection over the field names.
     """
+
+    # Every concrete subclass is a ``@dataclass``; declaring the attribute the
+    # decorator injects lets the type checker treat ``cls``/``self`` as dataclasses
+    # in the :func:`fields` calls below.
+    __dataclass_fields__: ClassVar[dict[str, Field[Any]]]
 
     @classmethod
     def names(cls) -> tuple[str, ...]:
