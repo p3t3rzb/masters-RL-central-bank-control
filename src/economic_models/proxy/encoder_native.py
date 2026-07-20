@@ -20,6 +20,7 @@ from __future__ import annotations
 import numpy as np
 
 from economic_models.encoders import GenerativeEncoder
+from economic_models.interface import ModelInterface
 from economic_models.proxy.base import BaseProxyModel, FitData, StepContext
 from economic_models.proxy.transform import StationarizingTransform
 
@@ -29,18 +30,20 @@ class EncoderNativeProxy(BaseProxyModel):
 
     def __init__(
         self,
+        interface: ModelInterface,
         *,
         encoder: GenerativeEncoder | None = None,
         transform: StationarizingTransform | None = None,
     ) -> None:
-        """Configure the encoder-native proxy.
+        """Configure the encoder-native proxy for the model ``interface`` it mimics.
 
-        ``encoder`` must be a :class:`GenerativeEncoder` (one with its own
-        ``forecast()``), validated here; ``transform`` is the shared feature
-        view. There are no estimator hyperparameters -- all learning lives in the
-        encoder.
+        ``interface`` is the ground-truth model's
+        :class:`~economic_models.interface.ModelInterface`. ``encoder`` must be a
+        :class:`GenerativeEncoder` (one with its own ``forecast()``), validated
+        here; ``transform`` is the shared feature view. There are no estimator
+        hyperparameters -- all learning lives in the encoder.
         """
-        super().__init__(encoder=encoder, transform=transform)
+        super().__init__(interface, encoder=encoder, transform=transform)
         if not isinstance(self.encoder, GenerativeEncoder):
             raise TypeError(
                 f"{type(self).__name__} needs a GenerativeEncoder (one with its "

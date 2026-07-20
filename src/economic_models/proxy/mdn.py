@@ -32,6 +32,7 @@ from torch.distributions import Categorical, Independent, MixtureSameFamily, Nor
 
 from economic_models._torch import resolve_device
 from economic_models.encoders import StateEncoder
+from economic_models.interface import ModelInterface
 from economic_models.proxy.base import BaseProxyModel, FitData, StepContext
 from economic_models.proxy.transform import StationarizingTransform
 
@@ -89,6 +90,7 @@ class MDNProxy(BaseProxyModel):
 
     def __init__(
         self,
+        interface: ModelInterface,
         n_components: int = 3,
         hidden: int = 64,
         n_layers: int = 2,
@@ -105,6 +107,8 @@ class MDNProxy(BaseProxyModel):
     ) -> None:
         """Configure the mixture density network and its training loop.
 
+        ``interface`` is the ground-truth model's
+        :class:`~economic_models.interface.ModelInterface` the proxy mimics.
         Network shape: ``n_components`` mixture components over a body of
         ``n_layers`` ``tanh`` layers of width ``hidden``. Optimisation: Adam with
         learning rate ``lr`` and L2 ``weight_decay`` for up to ``epochs``, holding
@@ -114,7 +118,7 @@ class MDNProxy(BaseProxyModel):
         ``"auto"`` -> CUDA/MPS/CPU). ``encoder`` / ``transform`` are the shared
         conditioning latent and feature view.
         """
-        super().__init__(encoder=encoder, transform=transform)
+        super().__init__(interface, encoder=encoder, transform=transform)
         self.n_components = n_components
         self.hidden = hidden
         self.n_layers = n_layers

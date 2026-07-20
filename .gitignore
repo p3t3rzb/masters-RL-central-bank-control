@@ -16,3 +16,8 @@ uv.lock
 papers/
 
 scripts/
+
+docs/
+
+# Generated datasets (regenerate with `python -m data_generation`)
+data/

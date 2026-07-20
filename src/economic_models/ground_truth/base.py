@@ -109,17 +109,17 @@ class PysolveEconomicModel(BaseEconomicModel):
     def state(self) -> State:
         """Latest values of the visible state, as a whole :class:`State`."""
         latest = self._model.solutions[-1]
-        return State.from_dict(latest)
+        return self.STATE.from_dict(latest)
 
     @property
     def parameters(self) -> Parameters:
         """Current values of the visible exogenous :class:`Parameters`."""
-        return Parameters.from_dict(self._parameter_values())
+        return self.PARAMETERS.from_dict(self._parameter_values())
 
     @property
     def actions(self) -> Actions:
         """Current values of the central bank's :class:`Actions`."""
-        return Actions.from_dict(self._parameter_values())
+        return self.ACTIONS.from_dict(self._parameter_values())
 
     def set_state(self, state: State) -> None:
         """Seed the visible state variables' initial values.

@@ -24,6 +24,7 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
 from economic_models.encoders import StateEncoder
+from economic_models.interface import ModelInterface
 from economic_models.proxy.base import BaseProxyModel, FitData, StepContext
 from economic_models.proxy.transform import StationarizingTransform
 
@@ -33,18 +34,20 @@ class KNNProxy(BaseProxyModel):
 
     def __init__(
         self,
+        interface: ModelInterface,
         k: int = 10,
         *,
         encoder: StateEncoder | None = None,
         transform: StationarizingTransform | None = None,
     ) -> None:
-        """Configure the analog forecaster.
+        """Configure the analog forecaster for the model ``interface`` it mimics.
 
-        ``k`` is the number of nearest neighbours averaged (or sampled among).
-        ``encoder`` / ``transform`` are the shared conditioning latent and
-        feature view.
+        ``interface`` is the ground-truth model's
+        :class:`~economic_models.interface.ModelInterface`. ``k`` is the number of
+        nearest neighbours averaged (or sampled among). ``encoder`` / ``transform``
+        are the shared conditioning latent and feature view.
         """
-        super().__init__(encoder=encoder, transform=transform)
+        super().__init__(interface, encoder=encoder, transform=transform)
         self.k = k
 
         self.knn_: NearestNeighbors | None = None

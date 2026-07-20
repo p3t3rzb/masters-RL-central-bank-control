@@ -27,6 +27,7 @@ import numpy as np
 from sklearn.ensemble import RandomForestRegressor
 
 from economic_models.encoders import StateEncoder
+from economic_models.interface import ModelInterface
 from economic_models.proxy.base import BaseProxyModel, FitData, StepContext
 from economic_models.proxy.transform import StationarizingTransform
 
@@ -36,6 +37,7 @@ class DRFProxy(BaseProxyModel):
 
     def __init__(
         self,
+        interface: ModelInterface,
         n_estimators: int = 300,
         min_samples_leaf: int = 5,
         max_features: float | str = 0.5,
@@ -44,14 +46,16 @@ class DRFProxy(BaseProxyModel):
         encoder: StateEncoder | None = None,
         transform: StationarizingTransform | None = None,
     ) -> None:
-        """Configure the distributional forest.
+        """Configure the distributional forest for the model ``interface`` it mimics.
 
-        ``n_estimators`` trees; ``min_samples_leaf`` the minimum leaf size (the
-        neighbourhood granularity); ``max_features`` the fraction/rule of
-        features tried per split; ``seed`` the forest RNG. ``encoder`` /
-        ``transform`` are the shared conditioning latent and feature view.
+        ``interface`` is the ground-truth model's
+        :class:`~economic_models.interface.ModelInterface`. ``n_estimators`` trees;
+        ``min_samples_leaf`` the minimum leaf size (the neighbourhood
+        granularity); ``max_features`` the fraction/rule of features tried per
+        split; ``seed`` the forest RNG. ``encoder`` / ``transform`` are the shared
+        conditioning latent and feature view.
         """
-        super().__init__(encoder=encoder, transform=transform)
+        super().__init__(interface, encoder=encoder, transform=transform)
         self.n_estimators = n_estimators
         self.min_samples_leaf = min_samples_leaf
         self.max_features = max_features

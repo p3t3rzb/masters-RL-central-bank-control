@@ -9,9 +9,17 @@ dividends and the lending mark-up).
 from pysolve.model import Model
 
 from economic_models.ground_truth.growth.modules.conventions import NOMINAL_YEAR_AGO
-from economic_models.variables import Actions, Parameters, State
+from economic_models.ground_truth.growth.variables import (
+    GrowthActions,
+    GrowthParameters,
+    GrowthState,
+)
 
-_DESC = {**State.describe(), **Parameters.describe(), **Actions.describe()}
+_DESC = {
+    **GrowthState.describe(),
+    **GrowthParameters.describe(),
+    **GrowthActions.describe(),
+}
 
 
 def add_commercial_banks_equations(model: Model) -> None:

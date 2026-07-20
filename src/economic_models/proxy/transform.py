@@ -1,19 +1,20 @@
 """The run feature transform: the stationary view a proxy is fit on.
 
-GROWTH-model levels trend, so a regression on them is ill-posed; every proxy is
-fit on this stationary feature view instead. The trending columns are
-stationarized before a proxy sees them:
+Model levels trend, so a regression on them is ill-posed; every proxy is fit on
+this stationary feature view instead. Which columns are stationarized (and how)
+is model-specific and comes from the model's
+:class:`~economic_models.interface.TransformSpec`:
 
-* trending aggregates (``Y``, ``Yk``, ``P``, ``Ck``, ``Ik``, ``Vk``) enter as
-  one-step log-differences (growth rates per step);
-* government stocks/flows (``GD``, ``PSBR``) enter as ratios to nominal GDP;
+* trending aggregates enter as one-step log-differences (growth rates per step);
+* stock/flow columns enter as ratios to a denominator column (e.g. nominal GDP);
 * everything already stationary (inflation, rates, ratios) enters as its level.
 
 State features are invertible given the previous step's levels
 (:meth:`~StationarizingTransform.transform_states` /
 :meth:`~StationarizingTransform.invert_states`), so a proxy can predict them and
 roll out in level space. Exogenous inputs are always given, never predicted, so
-they are forward-only (``Nfe`` log-differenced; the rest pass through as levels).
+they are forward-only (the ``exog_log_diff`` columns log-differenced; the rest
+pass through as levels).
 """
 
 from __future__ import annotations
@@ -22,53 +23,50 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from economic_models.variables import Actions, Parameters, State
+from economic_models.interface import TransformSpec
 
 if TYPE_CHECKING:
     from economic_models.ground_truth import Run
-
-#: state columns entered as one-step log-differences
-LOG_DIFF = ("Y", "Yk", "P", "Ck", "Ik", "Vk")
-#: state columns entered as a ratio to nominal GDP (``Y``)
-RATIO_TO_Y = ("GD", "PSBR")
-#: exogenous columns entered as one-step log-differences
-EXOG_LOG_DIFF = ("Nfe",)
 
 
 class StationarizingTransform:
     """Map a run between level space and a stationary feature space.
 
-    Stationarizes trending levels via one-step log-differences and GDP ratios;
-    invertible given the previous step's levels. The shared input-variable names
-    are fixed here.
+    Stationarizes trending levels via one-step log-differences and denominator
+    ratios; invertible given the previous step's levels. The columns and rules
+    come from the :class:`~economic_models.interface.TransformSpec` passed in, so
+    the transform is fully specified by (and specific to) one model's interface.
     """
 
-    #: endogenous input variables, aligned with :class:`State` columns
-    state_names: tuple[str, ...] = State.names()
-    #: exogenous input variables, aligned with ``Parameters`` then ``Actions``
-    exog_names: tuple[str, ...] = (*Parameters.names(), *Actions.names())
+    def __init__(self, spec: TransformSpec) -> None:
+        """Precompute the per-column log-diff / ratio masks and feature names.
 
-    def __init__(self) -> None:
-        """Precompute the per-column log-diff / ratio masks and feature names."""
+        ``spec`` names the state/exog columns and the stationarization rules
+        (which log-difference, which ratio to which denominator) for one model.
+        """
+        self.spec = spec
+        self.state_names = spec.state_names
+        self.exog_names = spec.exog_names
+
         state = self.state_names
-        self._state_log_diff = np.array([name in LOG_DIFF for name in state])
-        self._state_ratio = np.array([name in RATIO_TO_Y for name in state])
-        self._y_col = state.index("Y")
+        self._state_log_diff = np.array([name in spec.log_diff for name in state])
+        self._state_ratio = np.array([name in spec.ratio_to for name in state])
+        self._y_col = state.index(spec.denominator)
         # Names of the log-diffed columns, in mask order -- used to name the
         # offending series if a non-positive level ever reaches the log.
-        self._state_log_diff_names = tuple(n for n in state if n in LOG_DIFF)
+        self._state_log_diff_names = tuple(n for n in state if n in spec.log_diff)
         self._state_feature_names = tuple(
-            f"dlog({name})" if name in LOG_DIFF
-            else f"{name}/Y" if name in RATIO_TO_Y
+            f"dlog({name})" if name in spec.log_diff
+            else f"{name}/{spec.denominator}" if name in spec.ratio_to
             else name
             for name in state
         )
 
         exog = self.exog_names
-        self._exog_log_diff = np.array([name in EXOG_LOG_DIFF for name in exog])
-        self._exog_log_diff_names = tuple(n for n in exog if n in EXOG_LOG_DIFF)
+        self._exog_log_diff = np.array([name in spec.exog_log_diff for name in exog])
+        self._exog_log_diff_names = tuple(n for n in exog if n in spec.exog_log_diff)
         self._exog_feature_names = tuple(
-            f"dlog({name})" if name in EXOG_LOG_DIFF else name for name in exog
+            f"dlog({name})" if name in spec.exog_log_diff else name for name in exog
         )
 
     @staticmethod

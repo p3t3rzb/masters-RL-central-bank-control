@@ -8,6 +8,7 @@ the learned proxies implement it.
 """
 
 from abc import ABC, abstractmethod
+from typing import ClassVar
 
 from economic_models.variables import Actions, Parameters, State
 
@@ -15,19 +16,23 @@ from economic_models.variables import Actions, Parameters, State
 class BaseEconomicModel(ABC):
     """The central-bank-visible interface shared by every economic model.
 
-    The three value classes below double as the interface schema: their fields
-    name the model quantities every concrete model must expose. ``State`` fields
-    are endogenous observables; ``Parameters`` and ``Actions`` fields are the
-    exogenous inputs (the levers the bank sees but does not control, and the ones
-    it does). A subclass -- structural or learned -- realises this interface by
-    supplying the :attr:`state` / :attr:`parameters` / :attr:`actions`
-    observations and by advancing one period at a time via :meth:`advance`;
-    *how* it produces the next state is its own business.
+    The three :attr:`STATE` / :attr:`PARAMETERS` / :attr:`ACTIONS` value spaces
+    double as the interface schema: their fields name the model quantities the
+    model exposes. State fields are endogenous observables; parameter and action
+    fields are the exogenous inputs (the levers the bank sees but does not
+    control, and the ones it does). Each concrete model supplies its own three
+    (a ground-truth model as class attributes, a proxy as instance attributes set
+    from the model interface it mimics). A subclass -- structural or learned --
+    realises the interface by supplying the :attr:`state` / :attr:`parameters` /
+    :attr:`actions` observations and by advancing one period at a time via
+    :meth:`advance`; *how* it produces the next state is its own business.
     """
 
-    STATE = State
-    PARAMETERS = Parameters
-    ACTIONS = Actions
+    #: The model's endogenous-state / exogenous-observed / controlled value
+    #: spaces. Abstract here (no default); every concrete model must set them.
+    STATE: ClassVar[type[State]]
+    PARAMETERS: ClassVar[type[Parameters]]
+    ACTIONS: ClassVar[type[Actions]]
 
     def _exogenous_names(self) -> set[str]:
         """The names of every exogenous input: ``Parameters`` and ``Actions`` combined."""

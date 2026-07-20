@@ -10,9 +10,9 @@ cash).
 from pysolve.model import Model
 
 from economic_models.ground_truth.growth.modules.conventions import NOMINAL_YEAR_AGO
-from economic_models.variables import Parameters, State
+from economic_models.ground_truth.growth.variables import GrowthParameters, GrowthState
 
-_DESC = {**State.describe(), **Parameters.describe()}
+_DESC = {**GrowthState.describe(), **GrowthParameters.describe()}
 
 
 def add_households_equations(model: Model) -> None:

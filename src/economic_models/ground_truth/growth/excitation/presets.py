@@ -1,58 +1,44 @@
-"""The :class:`ExcitationConfig` and its calibrated presets.
+"""The GROWTH :class:`GrowthExcitationConfig` and its calibrated presets.
 
-A config bundles the per-input drift specs (visible and hidden), the
-government-spending stabilizer and the ``Nfe`` random walk, plus the optional
-volatility/crisis/climate layers. :meth:`ExcitationConfig.default` is the calm
-calibration the training datasets were generated with;
-:meth:`ExcitationConfig.realistic` adds volatility clustering, crises and
-per-run climates.
+A config bundles the model-agnostic per-input drift specs (visible and hidden)
+plus the optional volatility/crisis/climate layers (all inherited from
+:class:`~economic_models.ground_truth.excitation.base.ExcitationConfig`) and
+GROWTH's own special inputs: the government-spending stabilizer and the ``Nfe``
+random walk. :meth:`GrowthExcitationConfig.default` is the calm calibration the
+training datasets were generated with; :meth:`GrowthExcitationConfig.realistic`
+adds volatility clustering, crises and per-run climates.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping
 
-from economic_models.ground_truth.growth.excitation.specs import (
+from economic_models.ground_truth.excitation.base import ExcitationConfig
+from economic_models.ground_truth.excitation.specs import (
     AR1Spec,
     ClimateSpec,
     CrisisSpec,
-    GovSpendingSpec,
     RandomWalkSpec,
     StochasticVolatilitySpec,
 )
+from economic_models.ground_truth.growth.excitation.specs import GovSpendingSpec
 
 
 @dataclass(frozen=True)
-class ExcitationConfig:
-    """Everything tunable about how a run's exogenous inputs are excited.
+class GrowthExcitationConfig(ExcitationConfig):
+    """Everything tunable about how a GROWTH run's exogenous inputs are excited.
 
-    ``visible`` and ``hidden`` map an input name to its :class:`AR1Spec`; the
-    baselines the deviations are taken around come from the model calibration,
-    not from here. ``GRg`` and ``Nfe`` are handled by their own specs rather than
-    a plain AR(1).
+    Extends the generic :class:`ExcitationConfig` with GROWTH's special inputs:
+    ``GRg`` and ``Nfe`` are handled by their own specs rather than a plain AR(1).
+    The baselines the deviations are taken around come from the model calibration,
+    not from here.
     """
 
-    visible: Mapping[str, AR1Spec]  #: bank-visible Parameters/Actions drift
-    hidden: Mapping[str, AR1Spec]  #: hidden structural parameter drift
     gov_spending: GovSpendingSpec  #: government spending growth ``GRg``
     nfe: RandomWalkSpec  #: full-employment level ``Nfe``
-    #: optional stochastic-volatility regime scaling every innovation; ``None``
-    #: leaves innovation sizes constant (the calm default).
-    volatility: StochasticVolatilitySpec | None = None
-    #: optional rare recoverable crisis shocks; ``None`` disables them.
-    crisis: CrisisSpec | None = None
-    #: optional per-run turbulence draw mixing calm and crisis-prone runs;
-    #: ``None`` gives every run the same character.
-    climate: ClimateSpec | None = None
-
-    @property
-    def hidden_names(self) -> tuple[str, ...]:
-        """Hidden parameter names, in the column order recorded on a :class:`Run`."""
-        return tuple(self.hidden)
 
     @classmethod
-    def default(cls) -> "ExcitationConfig":
+    def default(cls) -> "GrowthExcitationConfig":
         """The calibrated excitation used to generate the training datasets.
 
         Sigmas and clips were tuned so the visible levers move enough to be
@@ -91,7 +77,7 @@ class ExcitationConfig:
         )
 
     @classmethod
-    def realistic(cls) -> "ExcitationConfig":
+    def realistic(cls) -> "GrowthExcitationConfig":
         """A crisis-capable excitation resembling a real economy's history.
 
         Extends :meth:`default` along three axes so a single ensemble spans the

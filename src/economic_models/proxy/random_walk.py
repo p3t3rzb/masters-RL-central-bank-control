@@ -23,6 +23,7 @@ from __future__ import annotations
 import numpy as np
 
 from economic_models.encoders import NullEncoder
+from economic_models.interface import ModelInterface
 from economic_models.proxy.base import BaseProxyModel, FitData, StepContext
 from economic_models.proxy.transform import StationarizingTransform
 
@@ -30,16 +31,23 @@ from economic_models.proxy.transform import StationarizingTransform
 class RandomWalkProxy(BaseProxyModel):
     """Driftless random walk in a transform's feature space (naive baseline)."""
 
-    def __init__(self, *, transform: StationarizingTransform | None = None) -> None:
-        """Configure the baseline.
+    def __init__(
+        self,
+        interface: ModelInterface,
+        *,
+        transform: StationarizingTransform | None = None,
+    ) -> None:
+        """Configure the baseline for the model ``interface`` it mimics.
 
-        Takes only ``transform`` (the shared feature view); the encoder is
-        hard-wired to the zero-width :class:`NullEncoder`, since a persistence
-        forecast conditions on no summary of the past.
+        ``interface`` is the ground-truth model's
+        :class:`~economic_models.interface.ModelInterface`; ``transform`` is the
+        shared feature view. The encoder is hard-wired to the zero-width
+        :class:`NullEncoder`, since a persistence forecast conditions on no
+        summary of the past.
         """
         # No ``encoder`` parameter by design: a persistence forecast needs no
         # summary of the past, so the null (zero-width) encoder is hard-wired.
-        super().__init__(encoder=NullEncoder(), transform=transform)
+        super().__init__(interface, encoder=NullEncoder(), transform=transform)
         self.change_cov_: np.ndarray | None = None  # cov of one-step feature changes
         self._chol: np.ndarray | None = None
 

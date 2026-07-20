@@ -10,6 +10,11 @@ from pysolve.model import Model
 
 from economic_models.ground_truth.base import PysolveEconomicModel
 from economic_models.ground_truth.growth.calibration import GrowthCalibration
+from economic_models.ground_truth.growth.variables import (
+    GrowthActions,
+    GrowthParameters,
+    GrowthState,
+)
 from economic_models.ground_truth.growth.modules.firms import (
     add_firms_equations,
     add_firms_params,
@@ -40,12 +45,17 @@ from economic_models.ground_truth.growth.modules.commercial_banks import (
 class GrowthModel(PysolveEconomicModel):
     """Stochastic growth model of a monetary economy (Godley & Lavoie, ch. 11).
 
-    The visible state/parameter interface is inherited unchanged from
-    :class:`PysolveEconomicModel`; this class only supplies the hidden internals
-    and equations that realise that interface, and seeds itself from
-    ``calibration`` (the book's baseline by default) before any constructor
-    ``param_overrides`` are applied.
+    The visible state/parameter interface is
+    :class:`~economic_models.ground_truth.growth.variables.GrowthState` /
+    ``GrowthParameters`` / ``GrowthActions``; this class supplies the hidden
+    internals and equations that realise it, and seeds itself from ``calibration``
+    (the book's baseline by default) before any constructor ``param_overrides``
+    are applied.
     """
+
+    STATE = GrowthState
+    PARAMETERS = GrowthParameters
+    ACTIONS = GrowthActions
 
     def __init__(
         self,

@@ -33,6 +33,7 @@ import numpy as np
 
 from economic_models.base import BaseEconomicModel
 from economic_models.encoders import KalmanEncoder, StateEncoder
+from economic_models.interface import ModelInterface
 from economic_models.proxy.transform import StationarizingTransform
 from economic_models.variables import Actions, Parameters, State
 
@@ -84,16 +85,27 @@ class BaseProxyModel(BaseEconomicModel):
 
     def __init__(
         self,
+        interface: ModelInterface,
         encoder: StateEncoder | None = None,
         transform: StationarizingTransform | None = None,
     ) -> None:
-        """Wire up the shared proxy plumbing.
+        """Wire up the shared proxy plumbing for the model ``interface`` it mimics.
 
-        ``encoder`` is the state encoder to condition on (defaults to a
-        :class:`KalmanEncoder`); ``transform`` is the stationary feature view to
-        fit in (defaults to a :class:`StationarizingTransform`).
+        ``interface`` is the ground-truth model's
+        :class:`~economic_models.interface.ModelInterface` -- its value spaces and
+        stationarization spec; it has no default, so the caller always says which
+        model this proxy stands in for. ``encoder`` is the state encoder to
+        condition on (defaults to a :class:`KalmanEncoder`); ``transform`` is the
+        stationary feature view to fit in (defaults to one built from
+        ``interface.transform_spec``).
         """
-        self._transform = transform or StationarizingTransform()
+        self._interface = interface
+        # The value spaces this proxy observes through, as instance attrs so
+        # ``self.STATE`` resolves the same way it does on a ground-truth model.
+        self.STATE = interface.state
+        self.PARAMETERS = interface.parameters
+        self.ACTIONS = interface.actions
+        self._transform = transform or StationarizingTransform(interface.transform_spec)
         # The filtered latent of a linear-Gaussian state-space model by default;
         # an encoder-free proxy passes a NullEncoder instead.
         self._encoder = encoder or KalmanEncoder()
@@ -275,7 +287,7 @@ class BaseProxyModel(BaseEconomicModel):
         self._levels_prev = levels
         self._exog_prev = exog_now
 
-        state = State.from_dict(dict(zip(self._transform.state_names, levels)))
+        state = self.STATE.from_dict(dict(zip(self._transform.state_names, levels)))
         self._solutions.append(state.to_dict())
         return state
 
@@ -288,11 +300,11 @@ class BaseProxyModel(BaseEconomicModel):
     ) -> np.ndarray:
         """Simulate ``len(params)`` periods from a warm-start window; returns levels."""
         self.reset(*window)
-        param_names, action_names = Parameters.names(), Actions.names()
+        param_names, action_names = self.PARAMETERS.names(), self.ACTIONS.names()
         levels = [
             self.step(
-                Parameters.from_dict(dict(zip(param_names, params[t]))),
-                Actions.from_dict(dict(zip(action_names, actions[t]))),
+                self.PARAMETERS.from_dict(dict(zip(param_names, params[t]))),
+                self.ACTIONS.from_dict(dict(zip(action_names, actions[t]))),
                 rng=rng,
             ).to_dict()
             for t in range(len(params))
@@ -308,17 +320,17 @@ class BaseProxyModel(BaseEconomicModel):
         """Latest simulated :class:`State` (available after the first :meth:`step`)."""
         if not self._solutions:
             raise RuntimeError("no state yet; call step()/rollout() first")
-        return State.from_dict(self._solutions[-1])
+        return self.STATE.from_dict(self._solutions[-1])
 
     @property
     def parameters(self) -> Parameters:
         """Exogenous :class:`Parameters` applied in the latest :meth:`step`."""
-        return Parameters.from_dict(self._exog_dict())
+        return self.PARAMETERS.from_dict(self._exog_dict())
 
     @property
     def actions(self) -> Actions:
         """Central-bank :class:`Actions` applied in the latest :meth:`step`."""
-        return Actions.from_dict(self._exog_dict())
+        return self.ACTIONS.from_dict(self._exog_dict())
 
     @property
     def solutions(self) -> list[dict[str, float]]:

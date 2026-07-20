@@ -20,6 +20,7 @@ from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 from economic_models.encoders import StateEncoder
+from economic_models.interface import ModelInterface
 from economic_models.proxy.base import BaseProxyModel, FitData, StepContext
 from economic_models.proxy.transform import StationarizingTransform
 
@@ -29,18 +30,21 @@ class VARXProxy(BaseProxyModel):
 
     def __init__(
         self,
+        interface: ModelInterface,
         ridge: float = 1e-6,
         *,
         encoder: StateEncoder | None = None,
         transform: StationarizingTransform | None = None,
     ) -> None:
-        """Configure the ridge map.
+        """Configure the ridge map for the model ``interface`` it mimics.
 
-        ``ridge`` is the per-``n`` L2 penalty strength on the standardized
-        regressors (size-invariant shrinkage). ``encoder`` / ``transform`` are
-        the shared conditioning latent and feature view.
+        ``interface`` is the ground-truth model's
+        :class:`~economic_models.interface.ModelInterface`. ``ridge`` is the
+        per-``n`` L2 penalty strength on the standardized regressors
+        (size-invariant shrinkage). ``encoder`` / ``transform`` are the shared
+        conditioning latent and feature view.
         """
-        super().__init__(encoder=encoder, transform=transform)
+        super().__init__(interface, encoder=encoder, transform=transform)
         self.ridge = ridge
         self.reg_: Pipeline | None = None  # standardize -> multi-output ridge
         self.residual_cov_: np.ndarray | None = None
