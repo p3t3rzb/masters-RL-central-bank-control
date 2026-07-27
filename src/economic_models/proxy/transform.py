@@ -26,7 +26,7 @@ import numpy as np
 from economic_models.interface import TransformSpec
 
 if TYPE_CHECKING:
-    from economic_models.ground_truth import Run
+    from economic_models.run import Run
 
 
 class StationarizingTransform:

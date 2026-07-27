@@ -21,7 +21,7 @@ from economic_models.ground_truth.excitation.specs import (
     RandomWalkSpec,
     StochasticVolatilitySpec,
 )
-from economic_models.ground_truth.growth.excitation.specs import GovSpendingSpec
+from economic_models.ground_truth.models.growth.excitation.specs import GovSpendingSpec
 
 
 @dataclass(frozen=True)

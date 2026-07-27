@@ -6,10 +6,10 @@ the same :class:`~economic_models.State` / :class:`~economic_models.Parameters`
 and the family-shared deterministic ``advance`` -- observed and driven in the
 same terms as the real economy.
 
-Several interchangeable estimators are provided -- a VARX, a distributional
-random forest, a mixture density network, a kNN analog forecaster, an
-encoder-native forecast reader, and a random-walk baseline -- all behind the
-:class:`BaseProxyModel` contract, all fitting on the shared
+Several interchangeable estimators live in :mod:`.models` -- a VARX, a
+distributional random forest, a mixture density network, a kNN analog
+forecaster, an encoder-native forecast reader, and a random-walk baseline -- all
+behind the :class:`BaseProxyModel` contract, all fitting on the shared
 :class:`~economic_models.proxy.transform.StationarizingTransform`. The
 conditioning encoders live in :mod:`economic_models.encoders`; the excitation
 machinery a proxy is fit on lives in :mod:`~economic_models.ground_truth`.
@@ -21,13 +21,15 @@ from economic_models.proxy.base import (
     RolloutState,
     StepContext,
 )
-from economic_models.proxy.drf import DRFProxy
-from economic_models.proxy.encoder_native import EncoderNativeProxy
-from economic_models.proxy.knn import KNNProxy
-from economic_models.proxy.mdn import MDNProxy
-from economic_models.proxy.random_walk import RandomWalkProxy
+from economic_models.proxy.models import (
+    DRFProxy,
+    EncoderNativeProxy,
+    KNNProxy,
+    MDNProxy,
+    RandomWalkProxy,
+    VARXProxy,
+)
 from economic_models.proxy.transform import StationarizingTransform
-from economic_models.proxy.varx import VARXProxy
 
 __all__ = [
     "StationarizingTransform",

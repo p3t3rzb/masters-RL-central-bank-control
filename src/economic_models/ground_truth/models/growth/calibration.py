@@ -1,7 +1,7 @@
 """Baseline calibration of the GROWTH model (Godley & Lavoie, ch. 11).
 
 A :class:`GrowthCalibration` partitions every starting value of a
-:class:`~economic_models.ground_truth.growth.model.GrowthModel` by what it is:
+:class:`~economic_models.ground_truth.models.growth.model.GrowthModel` by what it is:
 
 * ``structural_params`` -- behavioural/structural ``model.param`` values (not
   part of the visible interface);

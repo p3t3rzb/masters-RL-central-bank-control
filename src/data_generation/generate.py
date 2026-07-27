@@ -8,7 +8,7 @@ agent supplies the actions and the model produces the states at rollout, so a
 scenario fixes neither. Each group therefore stores the main run, the full
 internal *branch state* the main run ends in (the shared start every scenario is
 rolled out from), and one scenario per continuation (see
-:meth:`~economic_models.ground_truth.growth.excitation.generator.GrowthRunGenerator.generate_with_continuations`).
+:meth:`~economic_models.ground_truth.models.growth.excitation.generator.GrowthRunGenerator.generate_with_continuations`).
 The ``N`` groups are split into training and testing data at the group level, so
 a main run and all its continuations always stay on the same side of the split.
 
@@ -214,7 +214,7 @@ def generate_dataset(config: DatasetConfig, *, verbose: bool = True) -> dict:
     and returns it. The manifest records the config, the interface column order
     and a per-group summary, so the dataset is self-describing on disk.
     """
-    from economic_models.ground_truth.growth import (
+    from economic_models.ground_truth.models.growth import (
         GrowthActions as Actions,
         GrowthParameters as Parameters,
         GrowthState as State,

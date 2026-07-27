@@ -1,11 +1,11 @@
 """The training world: one historic run and the futures branching off its end.
 
 The whole control experiment is set in a single economy. A ground-truth
-:class:`~economic_models.ground_truth.run.Run` is simulated once -- the *history*
+:class:`~economic_models.run.Run` is simulated once -- the *history*
 -- and is the only data the proxy is ever fit on. From the state that history
 ends in, :meth:`~economic_models.ground_truth.excitation.base.ExcitedRunGenerator.generate_with_continuations`
 forks the excitation process into many independent *futures*: pure exogenous
-forcing paths (:class:`~economic_models.ground_truth.run.Scenario`), drawn without
+forcing paths (:class:`~economic_models.run.Scenario`), drawn without
 solving any model, because the states depend on the actions an agent has not
 chosen yet. Those futures are this package's episodes.
 
@@ -32,10 +32,9 @@ from economic_models.ground_truth import (
     GROWTH_INTERFACE,
     GrowthExcitationConfig,
     GrowthRunGenerator,
-    Run,
-    Scenario,
 )
-from economic_models.ground_truth.growth.excitation.specs import GovSpendingSpec
+from economic_models.ground_truth.models.growth.excitation.specs import GovSpendingSpec
+from economic_models.run import Run, Scenario
 
 #: The excitation presets a world may be built with.
 EXCITATIONS = ("default", "realistic")
@@ -105,10 +104,10 @@ class Episode:
 class FiscalStabilizer:
     """GROWTH's countercyclical spending response, applied at rollout.
 
-    A frozen :class:`~economic_models.ground_truth.run.Scenario` records ``GRg``
+    A frozen :class:`~economic_models.run.Scenario` records ``GRg``
     drawn at full employment, so the automatic response to a slump is missing
     from it. This adds it back from the realised employment rate, exactly as
-    :class:`~economic_models.ground_truth.growth.excitation.generator.GrowthExcitationProcess`
+    :class:`~economic_models.ground_truth.models.growth.excitation.generator.GrowthExcitationProcess`
     would have::
 
         GRg = clip(GRg_frozen + gain * (1 - ER_prev), *bounds)

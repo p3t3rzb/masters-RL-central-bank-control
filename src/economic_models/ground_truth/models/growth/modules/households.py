@@ -9,8 +9,8 @@ cash).
 
 from pysolve.model import Model
 
-from economic_models.ground_truth.growth.modules.conventions import NOMINAL_YEAR_AGO
-from economic_models.ground_truth.growth.variables import GrowthParameters, GrowthState
+from economic_models.ground_truth.models.growth.modules.conventions import NOMINAL_YEAR_AGO
+from economic_models.ground_truth.models.growth.variables import GrowthParameters, GrowthState
 
 _DESC = {**GrowthState.describe(), **GrowthParameters.describe()}
 

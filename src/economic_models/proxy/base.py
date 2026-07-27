@@ -39,7 +39,7 @@ from economic_models.proxy.transform import StationarizingTransform
 from economic_models.variables import Actions, Parameters, State
 
 if TYPE_CHECKING:
-    from economic_models.ground_truth import Run
+    from economic_models.run import Run
 
 
 @dataclass

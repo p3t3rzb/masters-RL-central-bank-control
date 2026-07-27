@@ -26,10 +26,10 @@ from economic_models.ground_truth.excitation.base import (
     ExcitationProcess,
     ExcitedRunGenerator,
 )
-from economic_models.ground_truth.growth.calibration import GrowthCalibration
-from economic_models.ground_truth.growth.excitation.presets import GrowthExcitationConfig
-from economic_models.ground_truth.growth.model import GrowthModel
-from economic_models.ground_truth.growth.variables import (
+from economic_models.ground_truth.models.growth.calibration import GrowthCalibration
+from economic_models.ground_truth.models.growth.excitation.presets import GrowthExcitationConfig
+from economic_models.ground_truth.models.growth.model import GrowthModel
+from economic_models.ground_truth.models.growth.variables import (
     GrowthActions,
     GrowthParameters,
     GrowthState,

@@ -14,7 +14,7 @@ latent row per period for the training design; **online filter**
 :meth:`~StateEncoder.latent`) carries a recursively updated, proxy-opaque belief
 through a rollout one step at a time. A :class:`GenerativeEncoder` additionally
 carries its own one-step feature forecast, which
-:class:`~economic_models.proxy.encoder_native.EncoderNativeProxy` reads off.
+:class:`~economic_models.proxy.models.encoder_native.EncoderNativeProxy` reads off.
 """
 
 from __future__ import annotations
@@ -113,7 +113,7 @@ class GenerativeEncoder(StateEncoder):
 
     Beyond summarising the past, a generative encoder can *predict* the next
     feature row from its belief -- it is a full sequence model, not only a
-    filter. :class:`~economic_models.proxy.encoder_native.EncoderNativeProxy`
+    filter. :class:`~economic_models.proxy.models.encoder_native.EncoderNativeProxy`
     requires one; other proxies work with any :class:`StateEncoder`.
     """
 

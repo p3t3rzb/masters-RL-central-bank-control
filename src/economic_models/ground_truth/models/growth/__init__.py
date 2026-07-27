@@ -2,13 +2,13 @@
 
 :class:`GrowthModel` is the chapter-11 model itself, seeded from a
 :class:`GrowthCalibration` and exposing the
-:class:`~economic_models.ground_truth.growth.variables.GrowthState` /
+:class:`~economic_models.ground_truth.models.growth.variables.GrowthState` /
 ``GrowthParameters`` / ``GrowthActions`` interface; the :mod:`.excitation`
 subpackage generates excited training histories from it.
 """
 
-from economic_models.ground_truth.growth.calibration import GrowthCalibration
-from economic_models.ground_truth.growth.excitation import (
+from economic_models.ground_truth.models.growth.calibration import GrowthCalibration
+from economic_models.ground_truth.models.growth.excitation import (
     AR1Spec,
     ClimateSpec,
     CrisisSpec,
@@ -19,9 +19,9 @@ from economic_models.ground_truth.growth.excitation import (
     RandomWalkSpec,
     StochasticVolatilitySpec,
 )
-from economic_models.ground_truth.growth.interface import GROWTH_INTERFACE
-from economic_models.ground_truth.growth.model import GrowthModel
-from economic_models.ground_truth.growth.variables import (
+from economic_models.ground_truth.models.growth.interface import GROWTH_INTERFACE
+from economic_models.ground_truth.models.growth.model import GrowthModel
+from economic_models.ground_truth.models.growth.variables import (
     GrowthActions,
     GrowthParameters,
     GrowthState,

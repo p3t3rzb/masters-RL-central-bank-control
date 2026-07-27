@@ -15,13 +15,13 @@ ground-truth model:
   special inputs (e.g. a stabilizer or a level random walk);
 * :class:`ExcitedRunGenerator` -- the reproducible driver that settles a model,
   steps it under the drawn inputs, dampens the solver on failure and records the
-  result as a :class:`~economic_models.ground_truth.run.Run` (plus branching
-  :class:`~economic_models.ground_truth.run.Scenario`\\ s).
+  result as a :class:`~economic_models.run.Run` (plus branching
+  :class:`~economic_models.run.Scenario`\\ s).
 
 A concrete model subclasses :class:`ExcitationProcess` and
 :class:`ExcitedRunGenerator` (and usually :class:`ExcitationConfig`) to supply
 its value spaces, its model factory, its per-step feedback signal and its
-special inputs -- see :mod:`economic_models.ground_truth.growth.excitation`.
+special inputs -- see :mod:`economic_models.ground_truth.models.growth.excitation`.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ from economic_models.ground_truth.excitation.specs import (
     CrisisSpec,
     StochasticVolatilitySpec,
 )
-from economic_models.ground_truth.run import Run, Scenario
+from economic_models.run import Run, Scenario
 from economic_models.variables import Actions, Parameters, State
 
 

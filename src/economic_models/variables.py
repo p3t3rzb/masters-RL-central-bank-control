@@ -10,7 +10,7 @@ These three are *abstract* here: field-less base classes that fix the tripartite
 split (endogenous / exogenous-observed / controlled) every model shares, without
 committing to any particular economy's quantities. Each ground-truth model
 specializes them with its own fields -- GROWTH, for instance, defines
-:class:`~economic_models.ground_truth.growth.variables.GrowthState` and friends.
+:class:`~economic_models.ground_truth.models.growth.variables.GrowthState` and friends.
 
 Splitting ``Parameters`` from ``Actions`` lets a scenario be written as an
 initial state plus the exogenous parameters over time -- without actions -- and
@@ -71,7 +71,7 @@ class State(ValueSpace):
 
     Abstract: a field-less base a concrete model subclasses with its own
     observable aggregates (see
-    :class:`~economic_models.ground_truth.growth.variables.GrowthState`).
+    :class:`~economic_models.ground_truth.models.growth.variables.GrowthState`).
     """
 
 

@@ -2,11 +2,11 @@
 
 A group on disk holds three kinds of artifact, each a compressed ``.npz``:
 
-* the **main run** -- a fully simulated :class:`~economic_models.ground_truth.run.Run`
+* the **main run** -- a fully simulated :class:`~economic_models.run.Run`
   (states/params/actions/hidden + diagnostics), the historic record;
 * the **branch state** -- the full internal ground-truth model state the main run
   ends in, the shared starting point every continuation is rolled out from;
-* the **continuation scenarios** -- :class:`~economic_models.ground_truth.run.Scenario`
+* the **continuation scenarios** -- :class:`~economic_models.run.Scenario`
   objects holding only the exogenous forcing (params + hidden), the world an
   in-control agent acts within (it supplies the actions; the model then produces
   the states).
@@ -25,7 +25,7 @@ from typing import Any
 
 import numpy as np
 
-from economic_models.ground_truth.run import Run, Scenario
+from economic_models.run import Run, Scenario
 
 #: Sentinel stored for an absent ``seed`` (``None``) in the integer metadata.
 _NO_SEED = -1

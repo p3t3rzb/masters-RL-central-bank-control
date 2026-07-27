@@ -2,40 +2,40 @@
 
 Wires together the five sector modules and owns every hidden internal directly.
 A freshly constructed model is fully seeded from its
-:class:`~economic_models.ground_truth.growth.calibration.GrowthCalibration`, so
+:class:`~economic_models.ground_truth.models.growth.calibration.GrowthCalibration`, so
 ``GrowthModel(Rbbar=0.04)`` just works with no external seeding.
 """
 
 from pysolve.model import Model
 
 from economic_models.ground_truth.base import PysolveEconomicModel
-from economic_models.ground_truth.growth.calibration import GrowthCalibration
-from economic_models.ground_truth.growth.variables import (
+from economic_models.ground_truth.models.growth.calibration import GrowthCalibration
+from economic_models.ground_truth.models.growth.variables import (
     GrowthActions,
     GrowthParameters,
     GrowthState,
 )
-from economic_models.ground_truth.growth.modules.firms import (
+from economic_models.ground_truth.models.growth.modules.firms import (
     add_firms_equations,
     add_firms_params,
     add_firms_variables,
 )
-from economic_models.ground_truth.growth.modules.households import (
+from economic_models.ground_truth.models.growth.modules.households import (
     add_households_equations,
     add_households_params,
     add_households_variables,
 )
-from economic_models.ground_truth.growth.modules.government import (
+from economic_models.ground_truth.models.growth.modules.government import (
     add_government_equations,
     add_government_params,
     add_government_variables,
 )
-from economic_models.ground_truth.growth.modules.central_bank import (
+from economic_models.ground_truth.models.growth.modules.central_bank import (
     add_central_bank_equations,
     add_central_bank_params,
     add_central_bank_variables,
 )
-from economic_models.ground_truth.growth.modules.commercial_banks import (
+from economic_models.ground_truth.models.growth.modules.commercial_banks import (
     add_commercial_banks_equations,
     add_commercial_banks_params,
     add_commercial_banks_variables,
@@ -46,7 +46,7 @@ class GrowthModel(PysolveEconomicModel):
     """Stochastic growth model of a monetary economy (Godley & Lavoie, ch. 11).
 
     The visible state/parameter interface is
-    :class:`~economic_models.ground_truth.growth.variables.GrowthState` /
+    :class:`~economic_models.ground_truth.models.growth.variables.GrowthState` /
     ``GrowthParameters`` / ``GrowthActions``; this class supplies the hidden
     internals and equations that realise it, and seeds itself from ``calibration``
     (the book's baseline by default) before any constructor ``param_overrides``

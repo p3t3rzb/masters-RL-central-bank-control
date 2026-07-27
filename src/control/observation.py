@@ -66,7 +66,7 @@ from typing import Any, Self
 import numpy as np
 
 from economic_models.encoders import NullEncoder, StateEncoder
-from economic_models.ground_truth import Run
+from economic_models.run import Run
 from economic_models.interface import ModelInterface
 from economic_models.proxy import StationarizingTransform
 

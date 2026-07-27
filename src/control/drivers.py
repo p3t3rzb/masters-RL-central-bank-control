@@ -1,7 +1,7 @@
 """Driving a model through an episode: the proxy and the ground truth alike.
 
 The environment must be able to run the *same* policy against a learned proxy and
-against the structural :class:`~economic_models.ground_truth.growth.model.GrowthModel`
+against the structural :class:`~economic_models.ground_truth.models.growth.model.GrowthModel`
 without changing a line, because the whole point of the experiment is the gap
 between those two returns. Both families already share
 :meth:`~economic_models.BaseEconomicModel.advance`, but they start an episode
