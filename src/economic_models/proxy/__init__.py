@@ -15,7 +15,12 @@ conditioning encoders live in :mod:`economic_models.encoders`; the excitation
 machinery a proxy is fit on lives in :mod:`~economic_models.ground_truth`.
 """
 
-from economic_models.proxy.base import BaseProxyModel, FitData, StepContext
+from economic_models.proxy.base import (
+    BaseProxyModel,
+    FitData,
+    RolloutState,
+    StepContext,
+)
 from economic_models.proxy.drf import DRFProxy
 from economic_models.proxy.encoder_native import EncoderNativeProxy
 from economic_models.proxy.knn import KNNProxy
@@ -28,6 +33,7 @@ __all__ = [
     "StationarizingTransform",
     "BaseProxyModel",
     "FitData",
+    "RolloutState",
     "StepContext",
     "VARXProxy",
     "DRFProxy",

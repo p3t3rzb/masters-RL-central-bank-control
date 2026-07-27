@@ -26,6 +26,7 @@ drift apart.
 from __future__ import annotations
 
 from abc import abstractmethod
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Self
 
@@ -73,6 +74,24 @@ class StepContext:
     z: np.ndarray
     u_next: np.ndarray
     f_prev: np.ndarray
+
+
+@dataclass(frozen=True)
+class RolloutState:
+    """An opaque snapshot of one proxy's position part-way through a rollout.
+
+    Everything :meth:`BaseProxyModel.step` reads and then overwrites: the encoder
+    belief, the previous state-feature row, and the previous state and exogenous
+    levels. ``n_solutions`` records how far the level history had grown, so
+    restoring also discards the steps taken since. The handle belongs to the
+    instance that produced it -- restoring it onto another proxy is meaningless.
+    """
+
+    belief: Any
+    feat_prev: np.ndarray | None
+    levels_prev: np.ndarray | None
+    exog_prev: np.ndarray | None
+    n_solutions: int
 
 
 class BaseProxyModel(BaseEconomicModel):
@@ -240,6 +259,41 @@ class BaseProxyModel(BaseEconomicModel):
         self._levels_prev = states[-1].astype(float)
         self._exog_prev = np.hstack([params[-1], actions[-1]]).astype(float)
         self._solutions = []
+
+    def snapshot(self) -> RolloutState:
+        """Capture the rollout position, so a step can be *redrawn* from it.
+
+        :meth:`step` is a draw from a conditional law, and a caller that wants
+        several draws of the same period -- one to continue along, the rest as
+        extra samples of the same transition -- has to put the rollout back
+        between draws. Copies defensively (the belief is opaque, and an encoder is
+        free to carry a mutable one), which is cheap next to a step.
+        """
+        return RolloutState(
+            belief=deepcopy(self._belief),
+            feat_prev=None if self._feat_prev is None else self._feat_prev.copy(),
+            levels_prev=None if self._levels_prev is None else self._levels_prev.copy(),
+            exog_prev=None if self._exog_prev is None else self._exog_prev.copy(),
+            n_solutions=len(self._solutions),
+        )
+
+    def restore(self, snapshot: RolloutState) -> None:
+        """Put the rollout back at a :meth:`snapshot`, discarding steps since.
+
+        Copies out of the snapshot rather than adopting it, so one snapshot can be
+        restored any number of times.
+        """
+        self._belief = deepcopy(snapshot.belief)
+        self._feat_prev = (
+            None if snapshot.feat_prev is None else snapshot.feat_prev.copy()
+        )
+        self._levels_prev = (
+            None if snapshot.levels_prev is None else snapshot.levels_prev.copy()
+        )
+        self._exog_prev = (
+            None if snapshot.exog_prev is None else snapshot.exog_prev.copy()
+        )
+        del self._solutions[snapshot.n_solutions :]
 
     def advance(self, parameters: Parameters, actions: Actions) -> State:
         """Deterministically advance one period (the family-shared driver).
