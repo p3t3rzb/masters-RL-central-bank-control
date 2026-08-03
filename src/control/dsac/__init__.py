@@ -19,15 +19,20 @@ from control.dsac.networks import QuantileCritic, SquashedGaussianPolicy
 from control.dsac.replay import Batch, ReplayBuffer
 from control.dsac.risk import CVaRRisk, MeanRisk, RiskMeasure
 from control.dsac.train import (
+    ENCODERS,
     PROXIES,
     TrainConfig,
     TrainingResult,
+    build_encoder,
     build_env,
+    build_obs_encoder,
     build_proxy,
     calibration_actions,
     constant_policy,
     evaluate,
     random_policy,
+    reset_policy,
+    rollout,
     taylor_policy,
     train,
 )
@@ -45,11 +50,16 @@ __all__ = [
     "TrainingResult",
     "train",
     "evaluate",
+    "rollout",
     "build_proxy",
+    "build_encoder",
+    "build_obs_encoder",
     "build_env",
     "random_policy",
     "constant_policy",
     "taylor_policy",
+    "reset_policy",
     "calibration_actions",
     "PROXIES",
+    "ENCODERS",
 ]

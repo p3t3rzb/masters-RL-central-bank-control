@@ -129,12 +129,19 @@ class ProxyDriver(ModelDriver):
     def required_window(self) -> int:
         """The whole history, not the proxy's bare minimum.
 
-        The proxy's belief conditions its every draw, and it is the same filter
-        the observation carries, so a reset that starts it at the encoder's prior
-        both mis-conditions the world model and desynchronises it from the
-        policy's view of the same latent. Encoding the whole run is what the
-        observer does (:meth:`~control.observation.Observer.fit`), and matching it
-        is what makes the two beliefs agree; :meth:`_reset` pays for it once, so
+        The proxy's belief conditions its every draw, so a reset that starts it at
+        the encoder's prior mis-conditions the world model for the several periods
+        the filter takes to catch up -- which are the opening periods of *every*
+        episode, since they all branch from the same place.
+
+        The observation's encoder is warm-started the same way and over the same
+        run (:meth:`~control.observation.Observer.fit`), but that is two filters
+        making the same choice rather than one filter shared: the two are
+        configured apart and need not even be the same family, because the
+        observation must be computable on the ground-truth side where no proxy
+        exists. What they have in common is the reason, not the belief.
+
+        :meth:`_reset` pays for the whole run once and restores thereafter, so
         there is no shorter tail worth tuning.
         """
         return len(self._world.history)

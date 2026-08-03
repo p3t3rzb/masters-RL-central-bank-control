@@ -52,7 +52,7 @@ from economic_models.proxy import (
 from control.dsac.agent import DSACAgent
 from control.dsac.replay import ReplayBuffer
 from control.dsac.risk import CVaRRisk, MeanRisk, RiskMeasure
-from control.drivers import ProxyDriver
+from control.drivers import GroundTruthDriver, ModelDriver, ProxyDriver
 from control.env import CentralBankEnv, EnvConfig
 from control.observation import Observer
 from control.rewards import MandateReward, RewardFunction
@@ -61,12 +61,20 @@ from control.world import TrainingWorld, WorldConfig, build_world
 #: The proxy families this trainer can use as a world model.
 PROXIES = ("varx", "drf", "mdn", "knn", "random-walk")
 
-#: The state encoders whose filtered latent can be appended to the observation.
-#: ``"none"`` is the memoryless agent -- a zero-width latent, so the observation
-#: is the two feature blocks and nothing else.
-OBS_ENCODERS = ("none", "kalman", "lstm")
+#: The state encoders, by name. Two are learned filters of the same shape -- the
+#: linear-Gaussian :class:`~economic_models.encoders.kalman.KalmanEncoder` and its
+#: nonlinear sibling the :class:`~economic_models.encoders.lstm.LSTMEncoder`, both
+#: taking a latent width and a seed and nothing else -- so either can play either
+#: of the two encoder roles here. ``"none"`` is the zero-width
+#: :class:`~economic_models.encoders.base.NullEncoder`: as the *proxy's* encoder
+#: it leaves a forecaster conditioned on the exogenous block alone (which is what
+#: the random walk uses), and as the *observation's* it is the memoryless agent.
+ENCODERS = ("none", "kalman", "lstm")
 
-#: A policy maps one observation to a normalised action in ``[-1, 1]``.
+#: A policy maps one observation to a normalised action in ``[-1, 1]``. Most are
+#: stateless functions of the observation; one that carries within-episode memory
+#: (the Taylor rule's smoothed growth gap) additionally offers a ``reset()``,
+#: which :func:`reset_policy` calls at every episode boundary.
 Policy = Callable[[np.ndarray], np.ndarray]
 
 
@@ -74,11 +82,21 @@ Policy = Callable[[np.ndarray], np.ndarray]
 class TrainConfig:
     """Everything that defines one training run.
 
-    The world fields mirror :class:`~control.world.WorldConfig`; ``proxy`` and
-    ``latent`` pick the world model and its encoder width; the remainder are the
-    agent's optimisation knobs. ``total_steps`` is the number of environment steps
-    and ``total_steps * branch_k`` the number of proxy draws, which is what
-    dominates the wall clock.
+    The world fields mirror :class:`~control.world.WorldConfig`; ``proxy``,
+    ``encoder`` and ``latent`` pick the world model and the conditioning latent it
+    forecasts from; the remainder are the agent's optimisation knobs.
+    ``total_steps`` is the number of environment steps and
+    ``total_steps * branch_k`` the number of proxy draws, which is what dominates
+    the wall clock.
+
+    The two encoders are configured **independently**: ``encoder``/``latent`` is
+    the filter the *world model* conditions on, ``obs_encoder``/``obs_latent`` the
+    filter the *policy* carries as its memory. Nothing requires them to match --
+    the observation must be computable on the ground-truth side, where there is no
+    proxy to borrow a latent from, so the two are separate instances holding
+    separate beliefs even when set to the same family. Crossing them (a Kalman
+    world model read by an LSTM-memory policy, say) is a supported ablation, not a
+    misconfiguration.
     """
 
     # -- world --
@@ -92,11 +110,16 @@ class TrainConfig:
 
     # -- world model --
     proxy: str = "varx"  #: which proxy family is the environment
-    latent: int = 10  #: encoder latent dimension
+    #: the encoder whose filtered latent the proxy forecasts from (one of
+    #: :data:`ENCODERS`). ``"kalman"`` is the linear-Gaussian filter, ``"lstm"``
+    #: its nonlinear sibling; ``"none"`` leaves the proxy conditioned on the
+    #: exogenous block alone, which is what the random walk is.
+    encoder: str = "kalman"
+    latent: int = 10  #: latent width of the proxy's state encoder
 
     # -- what the policy remembers --
     #: the encoder whose filtered latent is appended to the observation (one of
-    #: :data:`OBS_ENCODERS`). At ``"none"`` the agent is memoryless: it sees only
+    #: :data:`ENCODERS`). At ``"none"`` the agent is memoryless: it sees only
     #: the current stationary features, which are Markov in a world that is not,
     #: since the excitation's hidden structural parameters persist unobserved.
     #: Anything else gives it a recursive summary of the episode so far, fit once
@@ -203,22 +226,60 @@ class TrainingResult:
 # -- construction ----------------------------------------------------------
 
 
-def build_proxy(name: str, *, latent: int = 10, seed: int = 0) -> BaseProxyModel:
-    """An unfitted proxy of family ``name`` over the GROWTH interface."""
+def build_encoder(
+    name: str, *, latent: int = 10, seed: int = 0, role: str = "encoder"
+) -> StateEncoder:
+    """An unfitted state encoder of family ``name`` (one of :data:`ENCODERS`).
+
+    The one place an encoder is named, for both roles: the latent a proxy
+    forecasts from and the latent the observation carries. ``latent`` is its
+    width, ``seed`` its initialisation, and ``role`` only names the field in the
+    error message, since the two are configured separately and either can be
+    wrong.
+
+    Nothing beyond the width and the seed is exposed. The encoders' remaining
+    knobs (the LSTM's depth, epochs and learning rate, say) are the encoder
+    family's own business and are left at their defaults here, which is what keeps
+    the two families interchangeable at this seam.
+    """
+    if name not in ENCODERS:
+        raise ValueError(f"{role} must be one of {ENCODERS}, got {name!r}")
+    if name == "kalman":
+        return KalmanEncoder(latent_dim=latent, seed=seed)
+    if name == "lstm":
+        return LSTMEncoder(latent_dim=latent, seed=seed)
+    return NullEncoder()
+
+
+def build_proxy(
+    name: str, *, encoder: str = "kalman", latent: int = 10, seed: int = 0
+) -> BaseProxyModel:
+    """An unfitted proxy of family ``name`` over the GROWTH interface.
+
+    ``encoder`` picks the family of the conditioning latent it forecasts from and
+    ``latent`` that latent's width -- a free choice, since a proxy reads its
+    encoder through the :class:`~economic_models.encoders.base.StateEncoder`
+    interface alone. Each proxy gets its **own** instance, never a shared one: an
+    encoder is fitted state, and two proxies fitted on the same history must not
+    end up sharing one belief.
+
+    The random walk takes no encoder (it is the encoder-free baseline) and ignores
+    both arguments.
+    """
     if name not in PROXIES:
         raise ValueError(f"proxy must be one of {PROXIES}, got {name!r}")
 
-    def encoder() -> KalmanEncoder:
-        return KalmanEncoder(latent_dim=latent, seed=seed)
+    def new() -> StateEncoder:
+        return build_encoder(encoder, latent=latent, seed=seed, role="encoder")
 
     if name == "varx":
-        return VARXProxy(GROWTH_INTERFACE, encoder=encoder())
+        return VARXProxy(GROWTH_INTERFACE, encoder=new())
     if name == "drf":
-        return DRFProxy(GROWTH_INTERFACE, encoder=encoder(), seed=seed)
+        return DRFProxy(GROWTH_INTERFACE, encoder=new(), seed=seed)
     if name == "mdn":
-        return MDNProxy(GROWTH_INTERFACE, encoder=encoder(), seed=seed)
+        return MDNProxy(GROWTH_INTERFACE, encoder=new(), seed=seed)
     if name == "knn":
-        return KNNProxy(GROWTH_INTERFACE, encoder=encoder())
+        return KNNProxy(GROWTH_INTERFACE, encoder=new())
     return RandomWalkProxy(GROWTH_INTERFACE)
 
 
@@ -227,17 +288,35 @@ def build_obs_encoder(
 ) -> StateEncoder:
     """An unfitted state encoder for the observation's latent block.
 
-    Deliberately a fresh instance rather than the proxy's: the observation has to
-    be computable on the ground-truth side too, where there is no proxy to borrow
-    a component from. Both end up fit on the same history, so they agree.
+    Deliberately a fresh instance rather than the proxy's, even where both are the
+    same family: the observation has to be computable on the ground-truth side
+    too, where there is no proxy to borrow a component from. Both end up fit on
+    the same history, so they agree.
     """
-    if name not in OBS_ENCODERS:
-        raise ValueError(f"obs_encoder must be one of {OBS_ENCODERS}, got {name!r}")
-    if name == "kalman":
-        return KalmanEncoder(latent_dim=latent, seed=seed)
-    if name == "lstm":
-        return LSTMEncoder(latent_dim=latent, seed=seed)
-    return NullEncoder()
+    return build_encoder(name, latent=latent, seed=seed, role="obs_encoder")
+
+
+def _env(
+    driver: ModelDriver,
+    world: TrainingWorld,
+    observer: Observer,
+    reward: RewardFunction,
+    config: TrainConfig,
+    *,
+    split: str,
+    seed: int,
+) -> CentralBankEnv:
+    """An environment over ``driver``, drawing from the train or eval futures."""
+    episodes = world.train_futures if split == "train" else world.eval_futures
+    return CentralBankEnv(
+        driver,
+        episodes,
+        reward,
+        observer,
+        GROWTH_INTERFACE,
+        EnvConfig(collapse_penalty=config.collapse_penalty),
+        seed=seed,
+    )
 
 
 def build_env(
@@ -251,19 +330,51 @@ def build_env(
     seed: int,
 ) -> CentralBankEnv:
     """An environment over ``proxy`` drawing from the train or eval futures."""
-    episodes = world.train_futures if split == "train" else world.eval_futures
-    return CentralBankEnv(
-        ProxyDriver(proxy, world),
-        episodes,
-        reward,
-        observer,
-        GROWTH_INTERFACE,
-        EnvConfig(collapse_penalty=config.collapse_penalty),
-        seed=seed,
-    )
+    return _env(ProxyDriver(proxy, world), world, observer, reward, config,
+                split=split, seed=seed)
+
+
+def build_truth_env(
+    world: TrainingWorld,
+    observer: Observer,
+    reward: RewardFunction,
+    config: TrainConfig,
+    *,
+    split: str = "eval",
+    seed: int = 0,
+) -> CentralBankEnv:
+    """The same environment over the **structural** model instead of a proxy.
+
+    Everything a policy touches is unchanged -- the same observer, the same
+    mandate, the same action box, the same futures -- so a policy trained in the
+    proxy can be dropped straight in and what differs is only who answers "what
+    happens next". That is the whole point: the gap between a policy's return here
+    and in the proxy it was trained in *is* the surrogate's error, expressed in the
+    units the mandate is written in.
+
+    Expensive by comparison -- every step solves the full system rather than
+    sampling a fitted conditional -- and not branchable, so it is for evaluation
+    and never for training.
+    """
+    return _env(GroundTruthDriver(world), world, observer, reward, config,
+                split=split, seed=seed)
 
 
 # -- policies ---------------------------------------------------------------
+
+
+def reset_policy(policy: Policy) -> None:
+    """Clear a policy's within-episode memory at an episode boundary.
+
+    A no-op for the stateless policies, which is all of them but the Taylor rule
+    -- rather than making every policy carry an empty ``reset``, this asks for one
+    and does nothing when there is none, so a plain function stays a valid
+    :data:`Policy`. Called by :func:`evaluate` and :func:`rollout` right after
+    every :meth:`~control.env.CentralBankEnv.reset`.
+    """
+    reset = getattr(policy, "reset", None)
+    if reset is not None:
+        reset()
 
 
 def random_policy(action_dim: int, rng: np.random.Generator) -> Policy:
@@ -304,6 +415,26 @@ def taylor_policy(
     calibration: this is a monetary rule, and leaving the other two levers fixed
     is what makes it comparable to the baseline.
 
+    The gap is **smoothed over roughly a year** before it is acted on, by the same
+    exponential recursion the model itself uses to build ``PI`` from the one-period
+    price change (11.10: ``x = dt*x_raw + (1 - dt)*x(-1)``). Without it the rule is
+    not frequency-invariant and destabilises the economy at sub-quarterly ``dt``:
+    ``dlog(Yk)/dt`` annualises a *single* period's log-difference, whose transitory
+    component scales as ``sqrt(dt)`` rather than ``dt``, so the effective feedback
+    gain on it grows as ``1/sqrt(dt)`` while the transmission lag stays fixed in
+    calendar time -- high gain against an unchanged delay, which shows up as a
+    period-2 flip oscillation that the action clip then sustains as a limit cycle.
+    The smoother's gain at that flip frequency is ``dt/(2 - dt)``, which cancels the
+    ``1/dt`` annualisation almost exactly, so ``phi_y`` means the same thing at
+    quarterly and monthly steps. ``PI`` needs no such treatment: it arrives already
+    smoothed this way, which is why only the growth leg had to be fixed.
+
+    Carrying that smoothed gap makes the rule **stateful**: it holds one scalar
+    between steps and :meth:`reset` clears it at an episode boundary, which
+    :func:`reset_policy` does for every roll. It starts each episode at zero -- the
+    branch point sits at the book's calibration, which grows at potential -- so the
+    rule opens at the calibration rate and earns its deviations from data.
+
     The rule reads the standardised observation and inverts it, so it consumes
     exactly what the agent does and can be scored on the same futures. Rates
     outside :attr:`~control.env.EnvConfig.action_bounds` are clipped by
@@ -313,19 +444,68 @@ def taylor_policy(
     rule is therefore a reference, not a well-tuned policy -- which is the point of
     scoring it next to the constant baseline rather than instead of it.
     """
-    levels = dict(calibration_actions())
-    i_star = levels["Rbbar"]
-    pi_at, growth_at, potential_at, labour_at = (
-        observer.index(name) for name in ("PI", "dlog(Yk)", "GRpr", "dlog(Nfe)")
+    return _TaylorRule(
+        env,
+        observer,
+        dt=dt,
+        pi_target=pi_target,
+        phi_pi=phi_pi,
+        phi_y=phi_y,
     )
 
-    def policy(obs: np.ndarray) -> np.ndarray:
-        raw = observer.unstandardise(obs)
-        gap = raw[growth_at] / dt - (raw[potential_at] + raw[labour_at] / dt)
-        rate = i_star + (1.0 + phi_pi) * (raw[pi_at] - pi_target) + phi_y * gap
-        return env.to_normalised({**levels, "Rbbar": rate})
 
-    return policy
+class _TaylorRule:
+    """The stateful body of :func:`taylor_policy`; see it for the rule itself.
+
+    A class rather than a closure because the rule carries the smoothed growth gap
+    between steps and has to be told where an episode ends -- state a plain
+    function would have to hide in a cell and expose by attribute.
+    """
+
+    def __init__(
+        self,
+        env: CentralBankEnv,
+        observer: Observer,
+        *,
+        dt: float,
+        pi_target: float,
+        phi_pi: float,
+        phi_y: float,
+    ) -> None:
+        """Bind the rule to an environment and resolve its feature columns."""
+        self._env = env
+        self._observer = observer
+        self._dt = dt
+        self._pi_target = pi_target
+        self._phi_pi = phi_pi
+        self._phi_y = phi_y
+        self._levels = dict(calibration_actions())
+        self._i_star = self._levels["Rbbar"]
+        self._pi_at, self._growth_at, self._potential_at, self._labour_at = (
+            observer.index(name) for name in ("PI", "dlog(Yk)", "GRpr", "dlog(Nfe)")
+        )
+        self._gap = 0.0
+
+    def reset(self) -> None:
+        """Clear the smoothed growth gap; the next episode opens at potential."""
+        self._gap = 0.0
+
+    def __call__(self, obs: np.ndarray) -> np.ndarray:
+        """The bill rate the rule sets, given one standardised observation."""
+        raw = self._observer.unstandardise(obs)
+        dt = self._dt
+        gap = raw[self._growth_at] / dt - (
+            raw[self._potential_at] + raw[self._labour_at] / dt
+        )
+        # 11.10's smoother, applied to the growth gap: a ~1-year time constant at
+        # any dt, which is what keeps phi_y frequency-invariant.
+        self._gap = dt * gap + (1.0 - dt) * self._gap
+        rate = (
+            self._i_star
+            + (1.0 + self._phi_pi) * (raw[self._pi_at] - self._pi_target)
+            + self._phi_y * self._gap
+        )
+        return self._env.to_normalised({**self._levels, "Rbbar": rate})
 
 
 def agent_policy(agent: DSACAgent, *, deterministic: bool = True) -> Policy:
@@ -347,10 +527,11 @@ def evaluate(
     policy: Policy,
     n_episodes: int,
     *,
+    first: int = 0,
     seed: int = 0,
     repeats: int = 1,
 ) -> dict[str, float]:
-    """Score ``policy`` on the first ``n_episodes`` futures of ``env``'s bank.
+    """Score ``policy`` on ``n_episodes`` futures of ``env``'s bank from ``first``.
 
     The futures are the same ones every call, and each ``(future, repeat)`` pair
     is rolled under a fixed seed, so two policies scored here are **paired**: they
@@ -364,14 +545,30 @@ def evaluate(
     proxy's own stochasticity contributes *within* a future. Repeats cost
     ``n_episodes * horizon * repeats`` proxy steps, which is the same currency as
     training, so keep them for the headline rather than for every curve point.
+
+    ``first`` skips that many futures before taking ``n_episodes``, exactly as in
+    :func:`rollout` and with the same seeding, so a score and a recorded path taken
+    at the same ``first`` and ``seed`` are the *same* rolls -- which is what lets a
+    figure carry its own return without paying for it twice on a deterministic
+    model.
+
+    ``return`` is the episode total. Per **step**, divide it by the horizon rather
+    than by ``length``: a collapse is charged once for every period the episode
+    would still have run, so the horizon is what that charge was priced against.
     """
-    episodes = env.episodes.all()[:n_episodes]
+    episodes = env.episodes.all()[first : first + n_episodes]
+    if not episodes:
+        raise ValueError(
+            f"no futures at [{first}:{first + n_episodes}] of a bank of "
+            f"{len(env.episodes)}"
+        )
     per_future, lengths, collapses, rolls = [], [], 0, 0
     terms: dict[str, list[float]] = {}
     for i, episode in enumerate(episodes):
         returns = []
         for r in range(repeats):
-            obs, _ = env.reset(seed=seed + 10_000 * r + i, episode=episode)
+            obs, _ = env.reset(seed=seed + 10_000 * r + first + i, episode=episode)
+            reset_policy(policy)
             total, steps = 0.0, 0
             while True:
                 obs, reward, terminated, truncated, info = env.step(policy(obs))
@@ -400,6 +597,79 @@ def evaluate(
     return result
 
 
+def rollout(
+    env: CentralBankEnv,
+    policy: Policy,
+    n_episodes: int,
+    *,
+    first: int = 0,
+    seed: int = 0,
+) -> dict[str, np.ndarray]:
+    """Record what ``policy`` set and what the economy did, period by period.
+
+    Scores nothing -- :func:`evaluate` is the number -- this is the *picture*: one
+    row per future and one column per step, of every lever the policy moved and of
+    the three observables the mandate moves them for (annualised real growth, the
+    employment rate, inflation), plus the potential growth that leg is scored
+    against. The futures, their order and their per-future seeds are the ones
+    :func:`evaluate` uses at ``repeats=1``, so two policies rolled here are paired
+    with each other and with their scores.
+
+    ``first`` skips that many futures before taking ``n_episodes`` of them, and a
+    future keeps the seed of its position in the bank, so ``first`` chooses *which*
+    futures without changing what any one of them is. It is how the futures no
+    sweep ever touches are reached: :func:`evaluate` always reads the head of the
+    bank, so ``first=eval_episodes`` is the first future the run has never scored.
+
+    Real growth and potential growth both need the period *before* the first one,
+    which is the history's last row for every episode -- every future branches from
+    the same state, so the two series line up from step zero rather than starting
+    one period in.
+
+    A collapsed episode has no plausible state to record, so its row is ``NaN``
+    from the collapse onwards and a column-wise average is over the survivors.
+    """
+    world = env.driver.world
+    action_names = env.interface.actions.names()
+    yk = env.interface.state.names().index("Yk")
+    nfe, grpr = (env.interface.parameters.names().index(n) for n in ("Nfe", "GRpr"))
+
+    episodes = env.episodes.all()[first : first + n_episodes]
+    if not episodes:
+        raise ValueError(
+            f"no futures at [{first}:{first + n_episodes}] of a bank of "
+            f"{len(env.episodes)}"
+        )
+    horizon = max(len(e) for e in episodes)
+    series = {
+        name: np.full((len(episodes), horizon), np.nan)
+        for name in (*action_names, "growth", "potential", "ER", "PI")
+    }
+    for i, episode in enumerate(episodes):
+        obs, _ = env.reset(seed=seed + first + i, episode=episode)
+        reset_policy(policy)
+        prev_yk = float(world.history.states[-1][yk])
+        prev_nfe = float(world.history.params[-1][nfe])
+        for t in range(len(episode)):
+            obs, _, terminated, truncated, info = env.step(policy(obs))
+            if terminated:
+                break
+            state, actions = info["state"], info["actions"]
+            for name in action_names:
+                series[name][i, t] = getattr(actions, name)
+            exog = episode.params[t]
+            series["growth"][i, t] = np.log(state.Yk / prev_yk) / world.dt
+            series["potential"][i, t] = (
+                exog[grpr] + np.log(exog[nfe] / prev_nfe) / world.dt
+            )
+            series["ER"][i, t] = state.ER
+            series["PI"][i, t] = state.PI
+            prev_yk, prev_nfe = state.Yk, float(exog[nfe])
+            if truncated:
+                break
+    return series
+
+
 # -- training ---------------------------------------------------------------
 
 
@@ -419,8 +689,13 @@ def train(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
     world = build_world(config.world_config(), verbose=verbose)
 
     if verbose:
-        print(f"proxy: fitting {config.proxy} on {len(world.history)} steps...")
-    proxy = build_proxy(config.proxy, latent=config.latent, seed=config.seed)
+        print(
+            f"proxy: fitting {config.proxy} ({config.encoder} encoder, "
+            f"latent {config.latent}) on {len(world.history)} steps..."
+        )
+    proxy = build_proxy(
+        config.proxy, encoder=config.encoder, latent=config.latent, seed=config.seed
+    )
     proxy.fit([world.history])
     observer = Observer(
         GROWTH_INTERFACE,
