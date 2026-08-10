@@ -21,6 +21,12 @@ from torch import nn
 #: collapsing to a point mass or diffusing over the whole box.
 _LOG_STD_MIN, _LOG_STD_MAX = -20.0, 2.0
 
+#: How far inside ``(-1, 1)`` an action is clamped before the squash is inverted
+#: (:meth:`SquashedGaussianPolicy.log_prob`) -- ``atanh`` is unbounded at the
+#: edges, which ``tanh`` reaches only in the limit but floating point reaches
+#: exactly.
+_TANH_EPS = 1e-6
+
 
 def _mlp(in_dim: int, out_dim: int, hidden: int, n_layers: int) -> nn.Sequential:
     """A plain ReLU MLP of ``n_layers`` hidden layers of width ``hidden``."""
@@ -63,11 +69,31 @@ class SquashedGaussianPolicy(nn.Module):
         std = log_std.exp()
         normal = torch.distributions.Normal(mu, std)
         u = normal.rsample()
-        action = torch.tanh(u)
+        log_prob = self._squashed_log_prob(normal, u)
+        return torch.tanh(u), log_prob, torch.tanh(mu)
+
+    def log_prob(self, obs: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        """The log-density this policy assigns to an action *another* one chose.
+
+        :meth:`sample` hands back the density of its own draw, which is all the
+        entropy term needs; comparing two policies on the same action needs this
+        instead. Inverts the squash to recover the pre-squash point and scores it
+        there, clamping just inside ``(-1, 1)`` because ``atanh`` diverges at the
+        edges the ``tanh`` only approaches.
+        """
+        mu, log_std = self(obs)
+        normal = torch.distributions.Normal(mu, log_std.exp())
+        u = torch.atanh(action.clamp(-1.0 + _TANH_EPS, 1.0 - _TANH_EPS))
+        return self._squashed_log_prob(normal, u)
+
+    @staticmethod
+    def _squashed_log_prob(
+        normal: torch.distributions.Normal, u: torch.Tensor
+    ) -> torch.Tensor:
+        """Density of ``tanh(u)`` under the pre-squash Gaussian, summed over levers."""
         # log(1 - tanh(u)^2) = 2 * (log 2 - u - softplus(-2u)), stable for large |u|.
         correction = 2.0 * (np.log(2.0) - u - nn.functional.softplus(-2.0 * u))
-        log_prob = (normal.log_prob(u) - correction).sum(dim=-1, keepdim=True)
-        return action, log_prob, torch.tanh(mu)
+        return (normal.log_prob(u) - correction).sum(dim=-1, keepdim=True)
 
 
 class QuantileCritic(nn.Module):

@@ -11,13 +11,16 @@ adds volatility clustering, crises and per-run climates.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
+import numpy as np
 
 from economic_models.ground_truth.excitation.base import ExcitationConfig
 from economic_models.ground_truth.excitation.specs import (
     AR1Spec,
     ClimateSpec,
     CrisisSpec,
+    ExcitationJitter,
     RandomWalkSpec,
     StochasticVolatilitySpec,
 )
@@ -36,6 +39,16 @@ class GrowthExcitationConfig(ExcitationConfig):
 
     gov_spending: GovSpendingSpec  #: government spending growth ``GRg``
     nfe: RandomWalkSpec  #: full-employment level ``Nfe``
+
+    def _perturb_model_specs(
+        self, rng: np.random.Generator, jitter: ExcitationJitter
+    ) -> "GrowthExcitationConfig":
+        """Redraw GROWTH's own two specs on top of the generic perturbation."""
+        return replace(
+            self,
+            gov_spending=self.gov_spending.perturbed(rng, jitter),
+            nfe=self.nfe.perturbed(rng, jitter),
+        )
 
     @classmethod
     def default(cls) -> "GrowthExcitationConfig":
@@ -75,6 +88,40 @@ class GrowthExcitationConfig(ExcitationConfig):
             ),
             nfe=RandomWalkSpec(sigma=0.002, max_logdev=0.05),
         )
+
+    @classmethod
+    def calm(cls) -> "GrowthExcitationConfig":
+        """:meth:`realistic`'s *variables* under Great-Moderation *weather*.
+
+        Exactly the same inputs as :meth:`realistic` -- crucially the same hidden
+        ones, so a run drawn here and a run drawn there record the same columns
+        and a proxy fit on one can be deployed on the other. What differs is the
+        weather: no crises, no volatility clustering, no per-run climate, and
+        :meth:`default`'s tight clips back on every input the crisis-capable
+        preset widened.
+
+        This is the offline half of the deployment misspecification experiment
+        (:attr:`~control.world.WorldConfig.deploy_excitation`): fit the proxy and
+        train the agent in an economy that has never had a crisis, then deploy
+        them into one that does. An online correction is a device for closing the
+        gap between the world a model was *fitted* in and the world it is *run*
+        in, and it can only be measured where such a gap exists -- deploying onto
+        futures drawn from the very generator the proxy was fit on leaves it
+        nothing to correct but sampling noise.
+
+        The difference from :meth:`default` is only ``lambda40``, which
+        :meth:`default` does not excite at all. It is included here, clipped
+        narrowly around its baseline, so that the recorded hidden block has the
+        same width and column order as :meth:`realistic`'s: a variable that
+        barely moves, rather than an absent one.
+        """
+        base = cls.default()
+        hidden = dict(base.hidden)
+        # Equity portfolio preference (11.66), baseline 0.671. Narrow enough to
+        # be ordinary structural drift -- the crash room realistic() gives it is
+        # the whole point of the contrast.
+        hidden["lambda40"] = AR1Spec(0.003, 0.64, 0.70)
+        return replace(base, hidden=hidden)
 
     @classmethod
     def realistic(cls) -> "GrowthExcitationConfig":

@@ -28,8 +28,8 @@ from __future__ import annotations
 
 import copy
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Any, ClassVar, Mapping
+from dataclasses import dataclass, field, replace
+from typing import Any, ClassVar, Mapping, Sequence
 
 import numpy as np
 from pysolve.model import CalculationError, SolutionNotFoundError
@@ -37,6 +37,7 @@ from pysolve.model import CalculationError, SolutionNotFoundError
 from economic_models.ground_truth.base import PysolveEconomicModel
 from economic_models.ground_truth.excitation.specs import (
     AR1Spec,
+    ExcitationJitter,
     ClimateSpec,
     CrisisSpec,
     StochasticVolatilitySpec,
@@ -72,6 +73,46 @@ class ExcitationConfig:
         """Hidden parameter names, in the column order recorded on a :class:`Run`."""
         return tuple(self.hidden)
 
+    def perturbed(
+        self, rng: np.random.Generator, jitter: ExcitationJitter
+    ) -> "ExcitationConfig":
+        """A neighbouring economy: the same variables, drifting differently.
+
+        Every spec is redrawn around itself (see :class:`ExcitationJitter`), so
+        the result excites the same inputs under the same corridor and records
+        the same columns -- it is substitutable for this config anywhere, and in
+        particular is a legal ``continuation_config`` -- while the dynamics an
+        encoder filters and a proxy fits are no longer the ones they were fitted
+        to.
+
+        This is the difference between deploying onto *another draw* of the
+        economy the offline stack was built in and deploying into an economy of
+        comparable difficulty it has never seen. Only the second measures
+        transfer, and only the second gives an online correction a systematic
+        error to find rather than sampling noise to chase.
+        """
+        return replace(
+            self,
+            visible={n: s.perturbed(rng, jitter) for n, s in self.visible.items()},
+            hidden={n: s.perturbed(rng, jitter) for n, s in self.hidden.items()},
+            volatility=(
+                None if self.volatility is None else self.volatility.perturbed(rng, jitter)
+            ),
+            crisis=None if self.crisis is None else self.crisis.perturbed(rng, jitter),
+            climate=None if self.climate is None else self.climate.perturbed(rng, jitter),
+        )._perturb_model_specs(rng, jitter)
+
+    def _perturb_model_specs(
+        self, rng: np.random.Generator, jitter: ExcitationJitter
+    ) -> "ExcitationConfig":
+        """Perturb a subclass's own specs on top of :meth:`perturbed` (default: none).
+
+        The generic half has already been done and handed over as ``self``; a
+        subclass that adds specs of its own -- a stabilizer gain, a level walk --
+        redraws them here and returns the result.
+        """
+        return self
+
 
 class ExcitationProcess(ABC):
     """Stateful per-step draws of the exogenous inputs for one :class:`Run`.
@@ -104,6 +145,9 @@ class ExcitationProcess(ABC):
         self._baselines = baselines
         self._rng = rng
         self._dt = dt
+        # Kept so :meth:`reconfigure` can re-derive the climate's effect under a
+        # different config: the draw belongs to the run, the response to the spec.
+        self._climate = climate
         self._ar1 = {**config.visible, **config.hidden}
         self._devs = {name: 0.0 for name in self._ar1}
         self._logvol = 0.0
@@ -112,23 +156,110 @@ class ExcitationProcess(ABC):
         # at its own drawn rate. ``_crisis_total`` is the level shock applied now.
         self._crisis_episodes: list[tuple[dict[str, float], float]] = []
         self._crisis_total: dict[str, float] = {}
-        # ``min_gap`` is in years; convert to steps for the per-step onset guard.
-        self._min_gap_steps = round(config.crisis.min_gap / dt) if config.crisis else 0
+        self._adopt(config)
         self._since_crisis = self._min_gap_steps
-        # This run's climate biases volatility and crisis frequency for its whole
-        # life; a neutral 0.5-equivalent (no bias) applies when unset.
-        if config.climate is not None and climate is not None:
-            self._vol_offset = config.climate.vol_offset(climate)
-            self._crisis_scale = config.climate.crisis_scale(climate)
-        else:
-            self._vol_offset = 0.0
-            self._crisis_scale = 1.0
         #: diagnostics exposed after each :meth:`step` (not part of the interface)
         self.vol_multiplier = 1.0
         self.crisis_intensity = 0.0
         self._init_model_state()
 
+    def reconfigure(
+        self, config: ExcitationConfig, climate: float | None = None
+    ) -> None:
+        """Continue this process under a different spec, keeping where it is.
+
+        Swaps the config and everything derived from it while leaving the
+        *state* -- the AR(1) deviations, the volatility regime, any live crisis
+        episodes and the model's own drift state -- exactly where it stands. A
+        process reconfigured mid-run is therefore an economy whose weather
+        changed, not an economy restarted in different weather: it is at the same
+        point of the same drift, and only what happens next is drawn differently.
+
+        That is what makes it a *structural break* rather than a second sample.
+        Inputs the new config excites and the old one did not start at their
+        baseline (deviation zero), which is the only sensible reading of "this
+        variable was not moving before".
+
+        ``climate`` replaces this run's turbulence draw, and is how a preset that
+        has a :class:`~economic_models.ground_truth.excitation.specs.ClimateSpec`
+        takes over from one that does not: with nothing passed the old draw
+        stands, which for a calm history means ``None`` -- every future would
+        then be neutral, and a bank of futures that all have the same character
+        is exactly the heterogeneity the spec exists to provide.
+
+        Used by :meth:`ExcitedRunGenerator.generate_with_continuations` to fork
+        futures under a different preset than the history was drawn under -- see
+        :attr:`~control.world.WorldConfig.deploy_excitation`.
+        """
+        if climate is not None:
+            self._climate = climate
+        old = dict(self._ar1)
+        self._adopt(config)
+        self._devs = {
+            name: self._carried_deviation(name, old.get(name), spec)
+            for name, spec in self._ar1.items()
+        }
+        self._since_crisis = min(self._since_crisis, self._min_gap_steps)
+        self._reconfigure_model_state()
+
+    def _carried_deviation(
+        self, name: str, old: AR1Spec | None, new: AR1Spec
+    ) -> float:
+        """One input's deviation, re-expressed against the new spec's own centre.
+
+        A spec's deviation is measured from the level it reverts to, so when a
+        reconfiguration moves that level the same number means a different
+        economy. Re-basing keeps the **level** continuous across the branch: the
+        input carries on from exactly where it was, and the AR(1) then pulls it
+        toward its new resting place over the input's own persistence.
+
+        That gradualness is the point. A structural break implemented as an
+        instantaneous jump in a hidden parameter is a step change the proxy sees
+        in one period and the excitation never produces; a break implemented as a
+        moved steady state is a slow, systematic, *persistent* divergence between
+        the fitted model and the world -- which is what a real regime change
+        looks like and what the correction's forgetting factor and bias state
+        were built to track.
+
+        An input the previous spec did not excite starts at deviation zero, which
+        is the only sensible reading of "this was not moving before".
+        """
+        dev = self._devs.get(name, 0.0)
+        if old is None:
+            return 0.0
+        base = float(self._baselines[name])
+        return dev + float(
+            np.clip(base + old.center, old.lower, old.upper)
+            - np.clip(base + new.center, new.lower, new.upper)
+        )
+
+    def _adopt(self, config: ExcitationConfig) -> None:
+        """Take ``config`` and rebuild every cache derived from it."""
+        self._config = config
+        self._ar1 = {**config.visible, **config.hidden}
+        # ``min_gap`` is in years; convert to steps for the per-step onset guard.
+        self._min_gap_steps = (
+            round(config.crisis.min_gap / self._dt) if config.crisis else 0
+        )
+        # This run's climate biases volatility and crisis frequency for its whole
+        # life; a neutral 0.5-equivalent (no bias) applies when unset.
+        if config.climate is not None and self._climate is not None:
+            self._vol_offset = config.climate.vol_offset(self._climate)
+            self._crisis_scale = config.climate.crisis_scale(self._climate)
+        else:
+            self._vol_offset = 0.0
+            self._crisis_scale = 1.0
+
     # -- subclass contract -------------------------------------------------
+
+    def _reconfigure_model_state(self) -> None:
+        """Rebuild model-specific caches after :meth:`reconfigure` (default: none).
+
+        Distinct from :meth:`_init_model_state`, which also *resets* the drift
+        state a reconfiguration is required to preserve. A subclass that caches
+        anything off the config -- a spec pulled out of it, say -- rebuilds it
+        here and touches nothing else.
+        """
 
     def _init_model_state(self) -> None:
         """Initialise any model-specific per-run state (default: none).
@@ -352,6 +483,7 @@ class ExcitedRunGenerator(ABC):
         *,
         seed: int | None = None,
         continuation_seeds: list[int | None] | None = None,
+        continuation_configs: Sequence[ExcitationConfig | None] | None = None,
         excite: bool = True,
     ) -> tuple[Run, list[Scenario], dict[str, float]]:
         """Generate one main run, its branch state, and ``n_continuations`` scenarios.
@@ -371,14 +503,38 @@ class ExcitedRunGenerator(ABC):
         branch state is the common starting point every scenario is rolled out from.
 
         ``continuation_seeds`` must have ``n_continuations`` entries when given;
-        otherwise the scenarios draw from unseeded generators. Returns
-        ``(main_run, scenarios, branch_state)``.
+        otherwise the scenarios draw from unseeded generators.
+
+        ``continuation_configs`` optionally gives each continuation its own
+        excitation spec, taking effect *at the branch* (:meth:`ExcitationProcess.reconfigure`):
+        a ``None`` entry continues under the generator's own config, and anything
+        else is a **structural break** at the moment the future forks -- the
+        drift carries over, the weather changes. That is how a bank of futures
+        harsher than the history the model was fitted on is drawn, which is the
+        only setting in which an online correction has anything to correct. Every
+        config must record the same hidden inputs, since a :class:`Scenario`'s
+        hidden block is laid out by the generator's own column order.
+
+        Returns ``(main_run, scenarios, branch_state)``.
         """
         if continuation_seeds is not None and len(continuation_seeds) != n_continuations:
             raise ValueError(
                 "continuation_seeds must have n_continuations entries "
                 f"({len(continuation_seeds)} != {n_continuations})"
             )
+        if continuation_configs is not None:
+            if len(continuation_configs) != n_continuations:
+                raise ValueError(
+                    "continuation_configs must have n_continuations entries "
+                    f"({len(continuation_configs)} != {n_continuations})"
+                )
+            for cfg in continuation_configs:
+                if cfg is not None and cfg.hidden_names != self.config.hidden_names:
+                    raise ValueError(
+                        "a continuation config must excite the same hidden inputs "
+                        f"as the generator's: {cfg.hidden_names} != "
+                        f"{self.config.hidden_names}"
+                    )
         rng = np.random.default_rng(seed)
         model = self._settled_model()
         process, climate = self._start_process(rng, excite)
@@ -393,9 +549,28 @@ class ExcitedRunGenerator(ABC):
         for j in range(n_continuations):
             cont_seed = None if continuation_seeds is None else continuation_seeds[j]
             cont_process = self._fork_process(process, cont_seed)
+            cont_config = (
+                None if continuation_configs is None else continuation_configs[j]
+            )
+            cont_climate = climate
+            if cont_process is not None and cont_config is not None:
+                # A continuation only reaches here when it is a different economy
+                # (a different preset, a perturbation, or both), so its
+                # turbulence is redrawn under its *own* climate spec rather than
+                # inherited: a bank whose members all share the history's weather
+                # is a bank of one character. Drawn off a stream derived from --
+                # but not equal to -- the continuation's own seed, so it stays
+                # reproducible without shifting the shock stream that follows it.
+                if cont_config.climate is not None:
+                    cont_climate = cont_config.climate.draw(
+                        np.random.default_rng(
+                            None if cont_seed is None else cont_seed + 500_000_000
+                        )
+                    )
+                cont_process.reconfigure(cont_config, climate=cont_climate)
             scenarios.append(
                 self._drive_scenario(
-                    cont_process, continuation_steps, climate, cont_seed
+                    cont_process, continuation_steps, cont_climate, cont_seed
                 )
             )
         return main_run, scenarios, branch_state

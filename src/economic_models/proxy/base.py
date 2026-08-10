@@ -13,7 +13,10 @@ plumbing:
   an online belief through a rollout.
 * **open-loop simulation** -- :meth:`reset` warm-starts belief and level history
   from a trailing window, :meth:`step` advances one period under given exogenous
-  inputs, :meth:`rollout` chains the two over a whole exogenous path.
+  inputs, :meth:`rollout` chains the two over a whole exogenous path. Its
+  teacher-forced twin :meth:`~BaseProxyModel.absorb` advances the same rollout
+  state onto a period that *actually happened*, which is how a proxy shadows a
+  live run rather than drifting away from it.
 
 A concrete proxy therefore reduces to a memoryless map from ``(latent, next
 exog)`` to the next state-feature row: it implements :meth:`~BaseProxyModel._fit`,
@@ -140,6 +143,11 @@ class BaseProxyModel(BaseEconomicModel):
     # -- components (read-only) ----------------------------------------------
 
     @property
+    def interface(self) -> ModelInterface:
+        """The ground-truth model interface this proxy stands in for."""
+        return self._interface
+
+    @property
     def encoder(self) -> StateEncoder:
         """The state encoder this proxy conditions on (set at construction)."""
         return self._encoder
@@ -199,6 +207,41 @@ class BaseProxyModel(BaseEconomicModel):
             )[0]
         return self._sample_step(ctx, rng)
 
+    # -- the estimator, addressable from outside a rollout -------------------
+    #
+    # :meth:`step` reads the rollout state, predicts, and then overwrites it, so
+    # a caller that wants only the *prediction* -- to correct it, to score it
+    # against what actually happened, to draw from it without moving -- cannot
+    # get at one. These three expose the estimator itself: build the context a
+    # step would have conditioned on (:meth:`context`), then ask for the mean
+    # (:meth:`predict_mean`), a draw (:meth:`sample`), or a batch of means
+    # (:meth:`predict_means`). Nothing here touches the rollout position.
+
+    def context(self, parameters: Parameters, actions: Actions) -> StepContext:
+        """What a :meth:`step` under these exogenous inputs would condition on.
+
+        The rollout state read out rather than advanced: the current belief and
+        its latent, the exogenous feature row those inputs make against the
+        previous ones, and the current state-feature row. Requires a warm start.
+        """
+        if self._feat_prev is None:
+            raise RuntimeError("proxy has no warm start; call reset() first")
+        return self._context(self._exog_levels(parameters, actions))
+
+    def predict_mean(self, ctx: StepContext) -> np.ndarray:
+        """The conditional-mean state-feature row for one context."""
+        return self._predict_step(ctx, None)
+
+    def sample(self, ctx: StepContext, rng: np.random.Generator) -> np.ndarray:
+        """One draw from the conditional law at ``ctx``, from the fitted noise."""
+        return self._predict_step(ctx, rng)
+
+    def predict_means(
+        self, z: np.ndarray, u_next: np.ndarray, f_prev: np.ndarray
+    ) -> np.ndarray:
+        """Conditional means for aligned batches of contexts (diagnostics)."""
+        return self._predict_batch(z, u_next, f_prev)
+
     # -- training ----------------------------------------------------------
 
     def _context_arrays(
@@ -208,10 +251,21 @@ class BaseProxyModel(BaseEconomicModel):
         z = self._encoder.encode_run(F, U)
         return z[:-1], U[1:], F[:-1], F[1:]
 
-    def fit(self, runs: list[Run]) -> Self:
-        """Fit the proxy on ground-truth runs, in the chosen feature space."""
+    def fit(self, runs: list[Run], *, refit_encoder: bool = True) -> Self:
+        """Fit the proxy on ground-truth runs, in the chosen feature space.
+
+        ``refit_encoder=False`` fits the estimator alone, against the latents an
+        **already-fitted** encoder produces. One caller wants that: cross-fitting
+        (:func:`~control.live.residual.cross_fitted_residuals`), where the point
+        is to hold the *design* fixed while refitting the map on data that
+        excludes the rows being scored. A latent is only identified up to a
+        change of basis, so an encoder refit per fold would give each fold's
+        residuals a different set of columns and the pooled regression would be
+        fitting noise.
+        """
         feature_runs = [self._transform.transform_run(run) for run in runs]
-        self._encoder.fit(feature_runs)
+        if refit_encoder:
+            self._encoder.fit(feature_runs)
 
         blocks = [self._context_arrays(F, U) for F, U in feature_runs]
         data = FitData(
@@ -322,20 +376,73 @@ class BaseProxyModel(BaseEconomicModel):
                 "proxy has no warm start; call reset() (or rollout(), which resets "
                 "for you) before step()/advance()"
             )
-        exog_now = np.array(
-            [*parameters.to_dict().values(), *actions.to_dict().values()]
+        exog_now = self._exog_levels(parameters, actions)
+        ctx = self._context(exog_now)
+        features = self._predict_step(ctx, rng)
+        levels = self._transform.invert_states(features, self._levels_prev)
+        return self._advance_rollout(features, levels, ctx.u_next, exog_now)
+
+    def absorb(
+        self, state: State, parameters: Parameters, actions: Actions
+    ) -> None:
+        """Fold a **realised** period into the rollout state, predicting nothing.
+
+        The teacher-forced twin of :meth:`step`: it advances the belief, the
+        previous feature row and the previous levels by exactly the same
+        recursion, but onto the period that actually happened rather than onto
+        one this proxy drew. Everything it writes, :meth:`step` writes too; the
+        only difference is where the feature row came from.
+
+        This is what a proxy shadowing a live ground-truth run needs. A proxy
+        rolled open-loop drifts away from the economy within a few periods, so
+        its belief and its levels stop describing where the real economy is --
+        and a synthetic rollout branched off such a proxy branches from the wrong
+        state. Fed the realised period instead, it stands exactly where the truth
+        does, and a :meth:`snapshot` taken there is a usable branch point.
+
+        Requires a warm start, and (like :meth:`step`) that the realised levels
+        keep the log-differenced columns strictly positive.
+        """
+        if self._feat_prev is None:
+            raise RuntimeError("proxy has no warm start; call reset() first")
+        levels = np.array(
+            [state.to_dict()[name] for name in self._transform.state_names], dtype=float
         )
+        exog_now = self._exog_levels(parameters, actions)
+        features = self._transform.transform_states(
+            np.vstack([self._levels_prev, levels])
+        )[0]
         u_next = self._transform.transform_exog_row(exog_now, self._exog_prev)
-        ctx = StepContext(
+        self._advance_rollout(features, levels, u_next, exog_now)
+
+    def _exog_levels(self, parameters: Parameters, actions: Actions) -> np.ndarray:
+        """One row of exogenous **levels**, ordered like the transform expects."""
+        return np.array(
+            [*parameters.to_dict().values(), *actions.to_dict().values()], dtype=float
+        )
+
+    def _context(self, exog_now: np.ndarray) -> StepContext:
+        """The conditioning context for a period driven by ``exog_now`` levels."""
+        return StepContext(
             belief=self._belief,
             z=self._encoder.latent(self._belief),
-            u_next=u_next,
+            u_next=self._transform.transform_exog_row(exog_now, self._exog_prev),
             f_prev=self._feat_prev,
         )
 
-        features = self._predict_step(ctx, rng)
-        levels = self._transform.invert_states(features, self._levels_prev)
+    def _advance_rollout(
+        self,
+        features: np.ndarray,
+        levels: np.ndarray,
+        u_next: np.ndarray,
+        exog_now: np.ndarray,
+    ) -> State:
+        """Move the rollout onto one period, however that period was obtained.
 
+        The half of :meth:`step` after the prediction, shared with
+        :meth:`absorb` so a predicted period and a realised one advance the
+        belief and the level history by exactly the same recursion.
+        """
         self._belief = self._encoder.advance(self._belief, features, u_next)
         self._feat_prev = features
         self._levels_prev = levels

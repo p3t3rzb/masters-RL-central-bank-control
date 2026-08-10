@@ -14,10 +14,98 @@ model-specific specs alongside.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Mapping
 
 import numpy as np
+
+
+@dataclass(frozen=True)
+class ExcitationJitter:
+    """How far a *perturbed* copy of a spec may wander from the one it came from.
+
+    A preset names one economy. Two banks of futures drawn from it differ in
+    their shocks and in nothing else, so an agent trained across thousands of
+    them and a proxy fitted on a history from the same generator have, between
+    them, already seen that economy in full -- and a deployment onto a further
+    draw of it is a test of sampling luck rather than of transfer. Perturbing the
+    spec per deployment gives each one a *neighbouring* economy instead: the same
+    variables under the same corridor, drifting at its own speeds, with crises of
+    its own character.
+
+    The perturbations are deliberately **difficulty-neutral in the median**.
+    Scales are multiplied by a log-normal centred on one, so an economy is as
+    likely to be calmer as stormier and the deployment bank is not quietly a
+    harder bank; that is what makes this separable from
+    :attr:`~control.world.WorldConfig.deploy_excitation`, which is the knob for
+    deliberately deploying into something worse.
+
+    What is *not* perturbed is as considered as what is. Every ``lower``/
+    ``upper``/``max_*`` field is a hard clip that doubles as the solver-safety
+    corridor, so widening one risks a collapsed run rather than a different
+    economy, and none of them moves here. What moves is dynamics: how fast each
+    input drifts, how persistent it is, how often crises arrive and which
+    variables they hit hardest -- the structure a filter and a fitted proxy
+    actually encode, and therefore the structure whose change they must be
+    corrected for.
+    """
+
+    #: spread on the *operating point* each input drifts around, as a fraction of
+    #: its corridor's half-width. This is the one that makes a perturbed economy
+    #: a different economy rather than the same one shaken differently. Everything
+    #: else here changes how an input wobbles; this changes where it wobbles
+    #: *about* -- a different trend productivity growth, a different propensity to
+    #: consume, a different payout ratio -- so the perturbed world has its own
+    #: steady state and not merely its own noise. It is also, for exactly that
+    #: reason, the perturbation a fitted proxy is worst at: a model estimated at
+    #: one operating point is biased at another in a way that persists for the
+    #: whole run rather than averaging out, which is precisely the systematic,
+    #: slowly-varying residual an online correction exists to find.
+    #:
+    #: Applied to the *level* inputs only, and clipped into the same corridor
+    #: everything else respects. Where a baseline already sits near one edge of
+    #: its corridor the shift is effectively one-directional -- a smaller
+    #: perturbation than the number suggests, not a broken one.
+    center: float = 0.15
+    scale: float = 0.35  #: log-normal spread on every innovation size
+    persistence: float = 0.05  #: additive spread on annual AR(1)/decay persistence
+    rate: float = 0.50  #: log-normal spread on crisis onset rate and severity
+    impulse: float = 0.45  #: log-normal spread on each crisis impulse, drawn per input
+    feedback: float = 0.35  #: log-normal spread on a model's own feedback gains
+    #: the range an AR(1) persistence is kept inside. The lower bound stops a
+    #: perturbation turning slow structural drift into noise; the upper keeps
+    #: :func:`discretize_ar1` away from the unit root it cannot discretize.
+    phi_bounds: tuple[float, float] = (0.5, 0.98)
+
+    def scaled(self, strength: float) -> "ExcitationJitter":
+        """The same jitter with every spread multiplied by ``strength``.
+
+        One dial over the whole perturbation, so a deployment can be swept from
+        "the economy it trained in" to "a distant cousin of it" without choosing
+        five numbers -- and so the correction's value can be reported as a curve
+        in that dial rather than a single number at one arbitrary point on it.
+        """
+        if strength < 0.0:
+            raise ValueError(f"jitter strength must be non-negative, got {strength}")
+        return replace(
+            self,
+            center=self.center * strength,
+            scale=self.scale * strength,
+            persistence=self.persistence * strength,
+            rate=self.rate * strength,
+            impulse=self.impulse * strength,
+            feedback=self.feedback * strength,
+        )
+
+
+def lognormal_factor(rng: np.random.Generator, spread: float) -> float:
+    """A positive multiplier with median one and log-spread ``spread``.
+
+    The median rather than the mean, because these multiply *scale* parameters,
+    where the neutral point is the one that leaves a doubling and a halving
+    equally likely.
+    """
+    return 1.0 if spread <= 0.0 else float(np.exp(rng.normal(0.0, spread)))
 
 
 def discretize_ar1(phi: float, sigma: float, dt: float) -> tuple[float, float]:
@@ -56,6 +144,12 @@ class AR1Spec:
     lower: float  #: lower clip on the resulting level
     upper: float  #: upper clip on the resulting level
     phi: float = 0.9  #: annual AR(1) persistence
+    #: shift of the level the drift mean-reverts to, away from the model's own
+    #: baseline and inside the same corridor. Zero -- the calibrated economy --
+    #: everywhere except in a config redrawn by :meth:`perturbed`, where it is
+    #: what gives the perturbed world its own steady state rather than only its
+    #: own noise. The AR(1) reverts to ``base + center``, not to ``base``.
+    center: float = 0.0
 
     def advance(
         self,
@@ -77,11 +171,39 @@ class AR1Spec:
 
         ``dt`` is the timestep in years: ``phi``/``sigma`` are annual and are
         discretized with :func:`discretize_ar1`.
+
+        The deviation is taken around ``base + center``, itself held inside the
+        corridor, so a :meth:`perturbed` spec drifts about its own operating
+        point. At the default ``center = 0`` this is the baseline exactly.
         """
+        anchor = float(np.clip(base + self.center, self.lower, self.upper))
         phi_dt, sigma_dt = discretize_ar1(self.phi, self.sigma, dt)
         dev = phi_dt * dev + sigma_dt * sigma_scale * rng.standard_normal()
-        dev = float(np.clip(dev, self.lower - base, self.upper - base))
-        return dev, float(np.clip(base + dev + extra, self.lower, self.upper))
+        dev = float(np.clip(dev, self.lower - anchor, self.upper - anchor))
+        return dev, float(np.clip(anchor + dev + extra, self.lower, self.upper))
+
+    def perturbed(
+        self, rng: np.random.Generator, jitter: ExcitationJitter
+    ) -> "AR1Spec":
+        """A neighbouring drift: same corridor, its own centre, speed and memory.
+
+        The centre shift is scaled by the corridor's own half-width, which is the
+        only scale-free unit available: these inputs are growth rates, ratios and
+        propensities whose natural sizes differ by four orders of magnitude, and
+        the corridor is the one statement the calibration makes about how far
+        each may sensibly move.
+        """
+        half = 0.5 * (self.upper - self.lower)
+        return replace(
+            self,
+            sigma=self.sigma * lognormal_factor(rng, jitter.scale),
+            phi=float(
+                np.clip(
+                    self.phi + rng.normal(0.0, jitter.persistence), *jitter.phi_bounds
+                )
+            ),
+            center=self.center + float(rng.normal(0.0, jitter.center * half)),
+        )
 
 
 @dataclass(frozen=True)
@@ -108,6 +230,12 @@ class RandomWalkSpec:
         """
         logdev = logdev + self.sigma * np.sqrt(dt) * sigma_scale * rng.standard_normal()
         return float(np.clip(logdev, -self.max_logdev, self.max_logdev))
+
+    def perturbed(
+        self, rng: np.random.Generator, jitter: ExcitationJitter
+    ) -> "RandomWalkSpec":
+        """A neighbouring walk: same bound, its own step size."""
+        return replace(self, sigma=self.sigma * lognormal_factor(rng, jitter.scale))
 
 
 @dataclass(frozen=True)
@@ -141,6 +269,20 @@ class StochasticVolatilitySpec:
     def multiplier(self, logvol: float) -> float:
         """The innovation-size multiplier for the given log-volatility."""
         return float(np.exp(logvol))
+
+    def perturbed(
+        self, rng: np.random.Generator, jitter: ExcitationJitter
+    ) -> "StochasticVolatilitySpec":
+        """A neighbouring regime: same band, its own stickiness and swing."""
+        return replace(
+            self,
+            rho=float(
+                np.clip(
+                    self.rho + rng.normal(0.0, jitter.persistence), *jitter.phi_bounds
+                )
+            ),
+            xi=self.xi * lognormal_factor(rng, jitter.scale),
+        )
 
 
 @dataclass(frozen=True)
@@ -180,6 +322,49 @@ class CrisisSpec:
         """Every input a crisis can shock (base and financial), stable order."""
         return tuple({**self.impulses, **self.financial_impulses})
 
+    def perturbed(
+        self, rng: np.random.Generator, jitter: ExcitationJitter
+    ) -> "CrisisSpec":
+        """Crises of a different character: same kind of event, its own anatomy.
+
+        Each impulse is drawn its **own** multiplier rather than the bundle
+        sharing one. A common scale would only make crises deeper or shallower,
+        which ``severity_range`` already does at every onset and which the
+        history has therefore already shown the proxy. Independent draws change
+        *which* variables a crisis hits hardest -- credit against demand against
+        expectations -- and that is a covariance the fitted model has no way to
+        have learned.
+
+        ``min_gap`` is left alone: it is a structural guard against overlapping
+        onsets rather than a description of the economy.
+        """
+        rate = lognormal_factor(rng, jitter.rate)
+        severity = lognormal_factor(rng, jitter.rate)
+        decay = rng.normal(0.0, jitter.persistence)
+        return replace(
+            self,
+            prob=float(np.clip(self.prob * rate, 0.0, 1.0)),
+            severity_range=(
+                self.severity_range[0] * severity,
+                self.severity_range[1] * severity,
+            ),
+            decay_range=(
+                float(np.clip(self.decay_range[0] + decay, 0.5, 0.95)),
+                float(np.clip(self.decay_range[1] + decay, 0.5, 0.95)),
+            ),
+            impulses={
+                name: value * lognormal_factor(rng, jitter.impulse)
+                for name, value in self.impulses.items()
+            },
+            financial_prob=float(
+                np.clip(self.financial_prob * lognormal_factor(rng, jitter.rate), 0.0, 1.0)
+            ),
+            financial_impulses={
+                name: value * lognormal_factor(rng, jitter.impulse)
+                for name, value in self.financial_impulses.items()
+            },
+        )
+
 
 @dataclass(frozen=True)
 class ClimateSpec:
@@ -212,3 +397,21 @@ class ClimateSpec:
     def crisis_scale(self, climate: float) -> float:
         """Crisis-onset-probability multiplier for the given climate."""
         return self.crisis_lo + (self.crisis_hi - self.crisis_lo) * climate**self.gamma
+
+    def perturbed(
+        self, rng: np.random.Generator, jitter: ExcitationJitter
+    ) -> "ClimateSpec":
+        """A neighbouring mix of run characters: same axis, different weather map.
+
+        ``a`` and ``b`` move so the calm/stormy balance differs, and the two
+        gains so a given climate means something different. ``gamma`` holds: its
+        convexity is what keeps middling climates nearly crisis-free, and a
+        perturbation of it would change the shape of the mix rather than the mix.
+        """
+        return replace(
+            self,
+            a=self.a * lognormal_factor(rng, jitter.rate),
+            b=self.b * lognormal_factor(rng, jitter.rate),
+            vol_shift=self.vol_shift * lognormal_factor(rng, jitter.scale),
+            crisis_hi=self.crisis_hi * lognormal_factor(rng, jitter.rate),
+        )

@@ -17,8 +17,13 @@ puts a *policy* on the action side of that interface and trains it:
   terms.
 * :mod:`~control.dsac` -- the distributional soft actor-critic and its training
   loop.
+* :mod:`~control.live` -- what happens after training: the agent placed in the
+  ground truth for one unrepeatable run, correcting its world model online from
+  the transitions that actually happen and taking small, guarded MBPO-style
+  updates off the corrected model.
 
-Train from the command line with ``uv run python -m control``.
+Train from the command line with ``uv run python -m control``, and rehearse a
+deployment with ``uv run python scripts/deploy_agent.py``.
 """
 
 from control.drivers import GroundTruthDriver, ModelDriver, ProxyDriver

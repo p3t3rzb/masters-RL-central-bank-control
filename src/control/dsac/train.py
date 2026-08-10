@@ -78,6 +78,18 @@ ENCODERS = ("none", "kalman", "lstm")
 Policy = Callable[[np.ndarray], np.ndarray]
 
 
+class _Keep:
+    """Sentinel for "inherit this from the run's config".
+
+    Needed wherever the inherited setting may legitimately *be* ``None``, which
+    would otherwise be indistinguishable from "not specified".
+    """
+
+
+#: The single instance callers pass around.
+_KEEP = _Keep()
+
+
 @dataclass(frozen=True)
 class TrainConfig:
     """Everything that defines one training run.
@@ -103,9 +115,30 @@ class TrainConfig:
     dt: float = 0.25  #: length of one step in years
     history_steps: int = 500  #: steps of the single run the proxy is fit on
     horizon: int = 50  #: steps per episode
+    #: steps per exogenous future *in the bank*, defaulting to ``horizon``. The
+    #: two come apart only for a deployment (:mod:`control.live`), which runs one
+    #: future for hundreds of periods where training cuts the same bank into
+    #: episodes of fifty -- and which needs the futures generated long enough to
+    #: allow it, from the same world and the same seeds.
+    world_horizon: int | None = None
     n_train_futures: int = 2000  #: exogenous paths for training episodes
     n_eval_futures: int = 64  #: held-out exogenous paths
     excitation: str = "realistic"  #: excitation preset for the world
+    #: futures reserved for a live deployment, drawn under
+    #: :attr:`deploy_excitation`. Zero leaves the bank empty and
+    #: :func:`~control.live.deploy.rehearse` falls back on the eval one.
+    n_deploy_futures: int = 0
+    #: the preset that third bank is drawn under. ``None`` is the ordinary
+    #: setting -- one economy throughout -- and anything else deploys the offline
+    #: stack into a world it was not fitted in, which is the only condition under
+    #: which an online correction has a gap to close. See
+    #: :attr:`~control.world.WorldConfig.deploy_excitation`.
+    deploy_excitation: str | None = None
+    #: how far each deployment future's economy is redrawn around its preset.
+    #: Non-zero makes every rehearsal a *different* economy of comparable
+    #: difficulty, rather than another draw of the one the stack was built in.
+    #: See :attr:`~control.world.WorldConfig.deploy_jitter`.
+    deploy_jitter: float = 0.0
     world_seed: int = 0  #: seeds the history and its futures
 
     # -- world model --
@@ -130,6 +163,16 @@ class TrainConfig:
     # -- mandate --
     pi_target: float = 0.02  #: annual inflation target
     collapse_penalty: float = -25.0  #: reward per remaining step of a collapsed episode
+    #: how fast a lever may move, as a fraction of its box **per year**; ``None``
+    #: lets the agent swing it end to end between periods. Annualized so that one
+    #: number means one thing at every :attr:`dt` -- see
+    #: :attr:`~control.env.EnvConfig.action_rate`. Set here so that the
+    #: limit is part of the **environment** the agent is trained and evaluated in
+    #: rather than a filter applied to its output at deployment time -- a policy
+    #: optimised without it and then run under it is not the policy that was
+    #: optimised, and the acceptance test of :mod:`control.live` would be scoring
+    #: a controller that never acts. See :attr:`~control.env.EnvConfig.action_rate`.
+    action_rate: float | None = None
 
     # -- agent --
     total_steps: int = 100_000  #: environment steps (== proxy steps)
@@ -155,6 +198,18 @@ class TrainConfig:
     cvar_alpha: float = 0.1  #: tail fraction when ``risk="cvar"``
 
     # -- bookkeeping --
+    #: end the run on the best-scoring checkpoint rather than the last one. The
+    #: agent is training against a *surrogate*, and the longer it trains the more
+    #: of the surrogate's error it is free to exploit -- so the held-out score
+    #: rises, peaks, and then falls while the training score keeps improving. The
+    #: last iterate is not the best iterate, and there is no reason to deploy it.
+    #:
+    #: The cost is that the held-out futures, which training never learned from,
+    #: are now used to *select*, so the reported evaluation return is mildly
+    #: optimistic. The ground-truth replay is unaffected: it runs on futures past
+    #: the evaluation head (see :func:`rollout`'s ``first``), which no sweep and
+    #: therefore no selection has ever touched.
+    restore_best: bool = True
     eval_every: int = 5_000  #: environment steps between evaluations
     eval_episodes: int = 32  #: held-out futures per evaluation
     #: rolls per future during training evaluations. One is enough for a curve
@@ -183,10 +238,13 @@ class TrainConfig:
         return WorldConfig(
             dt=self.dt,
             history_steps=self.history_steps,
-            horizon=self.horizon,
+            horizon=self.world_horizon or self.horizon,
             n_train_futures=self.n_train_futures,
             n_eval_futures=self.n_eval_futures,
             excitation=self.excitation,
+            n_deploy_futures=self.n_deploy_futures,
+            deploy_excitation=self.deploy_excitation,
+            deploy_jitter=self.deploy_jitter,
             seed=self.world_seed,
         )
 
@@ -218,6 +276,9 @@ class TrainingResult:
     evals_: list[dict[str, float]] = field(default_factory=list)
     #: reference returns on the same held-out futures (one roll each, for the plot)
     baselines_: dict[str, dict[str, float]] = field(default_factory=dict)
+    #: the evaluation sweep :attr:`agent` was restored to, when
+    #: :attr:`TrainConfig.restore_best` is set: ``{"step", "return"}``
+    best_: dict[str, float] = field(default_factory=dict)
     #: the headline: agent and references re-scored with ``final_repeats`` rolls
     #: per future, so the across-future and proxy-noise spreads are separated
     final_: dict[str, dict[str, float]] = field(default_factory=dict)
@@ -252,16 +313,25 @@ def build_encoder(
 
 
 def build_proxy(
-    name: str, *, encoder: str = "kalman", latent: int = 10, seed: int = 0
+    name: str,
+    *,
+    encoder: str | StateEncoder = "kalman",
+    latent: int = 10,
+    seed: int = 0,
 ) -> BaseProxyModel:
     """An unfitted proxy of family ``name`` over the GROWTH interface.
 
     ``encoder`` picks the family of the conditioning latent it forecasts from and
     ``latent`` that latent's width -- a free choice, since a proxy reads its
     encoder through the :class:`~economic_models.encoders.base.StateEncoder`
-    interface alone. Each proxy gets its **own** instance, never a shared one: an
-    encoder is fitted state, and two proxies fitted on the same history must not
-    end up sharing one belief.
+    interface alone. An already-built encoder may be passed instead of a name, in
+    which case it is **copied**: that is how a caller gets several proxies that
+    agree on what their latent means (cross-fitting needs exactly this), without
+    them sharing one belief.
+
+    Either way each proxy gets its own instance, never a shared one: an encoder
+    is fitted state, and two proxies fitted on the same history must not end up
+    filtering into the same object.
 
     The random walk takes no encoder (it is the encoder-free baseline) and ignores
     both arguments.
@@ -270,6 +340,8 @@ def build_proxy(
         raise ValueError(f"proxy must be one of {PROXIES}, got {name!r}")
 
     def new() -> StateEncoder:
+        if isinstance(encoder, StateEncoder):
+            return copy.deepcopy(encoder)
         return build_encoder(encoder, latent=latent, seed=seed, role="encoder")
 
     if name == "varx":
@@ -305,8 +377,16 @@ def _env(
     *,
     split: str,
     seed: int,
+    horizon: int | None = None,
+    action_rate: float | None | _Keep = _KEEP,
 ) -> CentralBankEnv:
-    """An environment over ``driver``, drawing from the train or eval futures."""
+    """An environment over ``driver``, drawing from the train or eval futures.
+
+    ``action_rate`` defaults to the sentinel ``_KEEP``, meaning "whatever the run
+    was configured with". ``None`` is not available as that default because
+    ``None`` is a meaningful *value* -- no slew limit at all -- and a caller
+    switching the limit off for an ablation has to be able to say so.
+    """
     episodes = world.train_futures if split == "train" else world.eval_futures
     return CentralBankEnv(
         driver,
@@ -314,7 +394,13 @@ def _env(
         reward,
         observer,
         GROWTH_INTERFACE,
-        EnvConfig(collapse_penalty=config.collapse_penalty),
+        EnvConfig(
+            collapse_penalty=config.collapse_penalty,
+            horizon=horizon or config.horizon,
+            action_rate=(
+                config.action_rate if isinstance(action_rate, _Keep) else action_rate
+            ),
+        ),
         seed=seed,
     )
 
@@ -342,6 +428,8 @@ def build_truth_env(
     *,
     split: str = "eval",
     seed: int = 0,
+    horizon: int | None = None,
+    action_rate: float | None | _Keep = _KEEP,
 ) -> CentralBankEnv:
     """The same environment over the **structural** model instead of a proxy.
 
@@ -355,9 +443,15 @@ def build_truth_env(
     Expensive by comparison -- every step solves the full system rather than
     sampling a fitted conditional -- and not branchable, so it is for evaluation
     and never for training.
+
+    ``horizon`` overrides how many steps of a drawn future an episode runs for,
+    which a deployment needs: it takes one future for hundreds of periods where
+    training cut the bank into episodes of fifty. ``action_rate`` likewise
+    overrides the instrument's slew limit, which is how the deployment ablates it
+    without rebuilding the run it inherited.
     """
     return _env(GroundTruthDriver(world), world, observer, reward, config,
-                split=split, seed=seed)
+                split=split, seed=seed, horizon=horizon, action_rate=action_rate)
 
 
 # -- policies ---------------------------------------------------------------
@@ -640,7 +734,12 @@ def rollout(
             f"no futures at [{first}:{first + n_episodes}] of a bank of "
             f"{len(env.episodes)}"
         )
-    horizon = max(len(e) for e in episodes)
+    # An episode is the shorter of its future and the environment's cap (see
+    # :attr:`~control.env.EnvConfig.horizon`), so the panels are that wide --
+    # sizing them by the future alone would draw a run of trailing ``NaN`` as
+    # though every episode had collapsed at the cap.
+    cap = env.config.horizon or max(len(e) for e in episodes)
+    horizon = min(max(len(e) for e in episodes), cap)
     series = {
         name: np.full((len(episodes), horizon), np.nan)
         for name in (*action_names, "growth", "potential", "ER", "PI")
@@ -650,7 +749,7 @@ def rollout(
         reset_policy(policy)
         prev_yk = float(world.history.states[-1][yk])
         prev_nfe = float(world.history.params[-1][nfe])
-        for t in range(len(episode)):
+        for t in range(min(len(episode), cap)):
             obs, _, terminated, truncated, info = env.step(policy(obs))
             if terminated:
                 break
@@ -673,8 +772,21 @@ def rollout(
 # -- training ---------------------------------------------------------------
 
 
-def train(config: TrainConfig | None = None, *, verbose: bool = True) -> TrainingResult:
-    """Build the world, fit the proxy and train a DSAC agent inside it.
+def setup(config: TrainConfig | None = None, *, verbose: bool = True) -> TrainingResult:
+    """Everything a run needs before the first gradient step, and nothing more.
+
+    Builds the world, fits the proxy on its history, fits the observation on the
+    same history, and constructs the two environments and an untrained agent --
+    returning them in a :class:`TrainingResult` whose histories are all still
+    empty. :func:`train` calls this and then runs the loop.
+
+    It is separate because the loop is the only expensive part. A caller that
+    already has a trained actor on disk -- the deployment script of
+    :mod:`control.live`, which needs the *same* world, the *same* proxy and above
+    all the *same* observation the checkpoint was trained against -- rebuilds the
+    stack here in seconds and loads the weights into
+    :attr:`TrainingResult.agent`, rather than paying for the training run again
+    to recover the things around it.
 
     Sets torch's thread count process-wide before anything else (see
     :attr:`TrainConfig.threads`), which is a global side effect but the right
@@ -684,7 +796,6 @@ def train(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
     config = config or TrainConfig()
     if config.threads:
         torch.set_num_threads(config.threads)
-    rng = np.random.default_rng(config.seed)
 
     world = build_world(config.world_config(), verbose=verbose)
 
@@ -731,11 +842,21 @@ def train(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
         seed=config.seed,
         device=config.device,
     )
-    buffer = ReplayBuffer(config.capacity, env.obs_dim, env.action_dim)
-    result = TrainingResult(
+    return TrainingResult(
         agent=agent, world=world, proxy=proxy, observer=observer,
         env=env, eval_env=eval_env, config=config,
     )
+
+
+def train(config: TrainConfig | None = None, *, verbose: bool = True) -> TrainingResult:
+    """Build the world, fit the proxy and train a DSAC agent inside it."""
+    config = config or TrainConfig()
+    result = setup(config, verbose=verbose)
+    observer = result.observer
+    env, eval_env, agent = result.env, result.eval_env, result.agent
+
+    rng = np.random.default_rng(config.seed)
+    buffer = ReplayBuffer(config.capacity, env.obs_dim, env.action_dim)
 
     explore = random_policy(env.action_dim, rng)
     references: dict[str, Policy] = {
@@ -772,6 +893,7 @@ def train(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
     episode_return, episode_steps = 0.0, 0
     episode_terms: dict[str, list[float]] = {}
     stats: dict[str, float] = {}
+    best_agent: DSACAgent | None = None
 
     for step in range(1, config.total_steps + 1):
         action = explore(obs) if step <= config.warmup else agent.act(obs)
@@ -779,10 +901,15 @@ def train(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
         # the trajectory is unchanged and the buffer gains ``branch_k`` samples of
         # the kernel at this state rather than one.
         draws = env.branch_step(action, config.branch_k)
+        # What the environment *applied*, which is the requested action only when
+        # no slew limit bound (see :attr:`~control.env.EnvConfig.action_rate`).
+        # Every draw from this position applied the same one; storing the request
+        # instead would pair a reward with an action that did not earn it.
+        applied = draws[-1].info.get("action", action)
         # ``done`` marks a genuine terminal state only: a horizon truncation must
         # still bootstrap, or the agent learns the world ends every episode.
         for draw in draws:
-            buffer.add(obs, action, draw.reward, draw.obs, draw.terminated)
+            buffer.add(obs, applied, draw.reward, draw.obs, draw.terminated)
         next_obs, reward, terminated, truncated, info = draws[-1].as_step()
         episode_return += reward
         episode_steps += 1
@@ -817,6 +944,11 @@ def train(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
                 repeats=config.eval_repeats,
             )
             result.evals_.append({"step": step, **scores})
+            if config.restore_best and (
+                not result.best_ or scores["return"] > result.best_["return"]
+            ):
+                result.best_ = {"step": float(step), "return": scores["return"]}
+                best_agent = agent.clone()
             if verbose:
                 recent = result.episodes_[-20:]
                 train_return = np.mean([e["return"] for e in recent]) if recent else np.nan
@@ -829,6 +961,19 @@ def train(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
                 )
             # The evaluation ran on a copy, but the training environment's own
             # episode is mid-flight; leave it running.
+
+    # Rewind to the best-scoring checkpoint *before* the final scoring, so the
+    # headline, the figures and anything the caller goes on to deploy are all the
+    # same agent -- the one that was kept, not the one training happened to end on.
+    if best_agent is not None:
+        agent = best_agent
+        result.agent = agent
+        if verbose and result.best_["step"] != config.total_steps:
+            print(
+                f"restored the best checkpoint: step {result.best_['step']:.0f} "
+                f"(eval {result.best_['return']:.1f}), discarding the "
+                f"{config.total_steps - result.best_['step']:.0f} steps after it"
+            )
 
     # The headline, paid for once: every future rolled ``final_repeats`` times,
     # so the spread across futures and the spread the proxy's own noise adds are
@@ -859,8 +1004,29 @@ def train(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
 # -- CLI ---------------------------------------------------------------------
 
 
+def _flag_kind(annotation: str) -> Callable[[str], object]:
+    """The parser for one config field, from its declared type.
+
+    Read off the **annotation** rather than the default's runtime type, which is
+    what a field defaulting to ``None`` has none of: ``int | None`` would parse as
+    ``str`` and hand the run ``"210"`` where it expected ``210``. ``"none"`` is
+    accepted for optional fields so a value can be cleared from the command line.
+    """
+    base = annotation.replace("| None", "").replace("Optional", "").strip(" []")
+    parse: Callable[[str], object] = {"int": int, "float": float}.get(base, str)
+    if "None" not in annotation:
+        return parse
+    return lambda text: None if text.lower() in ("none", "") else parse(text)
+
+
 def _parse_args() -> TrainConfig:
-    """Build a :class:`TrainConfig` from the command line."""
+    """Build a :class:`TrainConfig` from the command line.
+
+    Every field becomes a flag. Booleans become a ``--flag/--no-flag`` pair,
+    because ``type=bool`` in argparse is a trap -- it runs the constructor on the
+    string, and every non-empty string is true, so ``--restore-best False`` would
+    switch the option *on*.
+    """
     defaults = TrainConfig()
     ap = argparse.ArgumentParser(
         description="Train a DSAC central bank inside a fitted proxy economy."
@@ -868,8 +1034,16 @@ def _parse_args() -> TrainConfig:
     for f in fields(defaults):
         flag = "--" + f.name.replace("_", "-")
         current = getattr(defaults, f.name)
-        kind = str if current is None else type(current)
-        ap.add_argument(flag, type=kind, default=current, help=f.metadata.get("help", ""))
+        help_text = f.metadata.get("help", "")
+        if isinstance(current, bool):
+            ap.add_argument(
+                flag, default=current, help=help_text,
+                action=argparse.BooleanOptionalAction,
+            )
+            continue
+        ap.add_argument(
+            flag, type=_flag_kind(str(f.type)), default=current, help=help_text
+        )
     args = ap.parse_args()
     return replace(defaults, **{f.name: getattr(args, f.name) for f in fields(defaults)})
 

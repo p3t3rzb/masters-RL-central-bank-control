@@ -33,6 +33,7 @@ from control.dsac.train import (
     random_policy,
     reset_policy,
     rollout,
+    setup,
     taylor_policy,
     train,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "TrainConfig",
     "TrainingResult",
     "train",
+    "setup",
     "evaluate",
     "rollout",
     "build_proxy",

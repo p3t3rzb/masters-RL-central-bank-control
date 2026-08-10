@@ -47,10 +47,14 @@ class GrowthExcitationProcess(ExcitationProcess):
 
     def _init_model_state(self) -> None:
         """Seed the GRg-gap and Nfe log-deviation draw state for this run."""
-        # The GRg gap to productivity growth is itself an AR(1) around 0.
-        self._grg_gap_spec = self._config.gov_spending.gap_spec()
+        self._reconfigure_model_state()
         self._grg_gap = 0.0
         self._log_nfe_dev = 0.0
+
+    def _reconfigure_model_state(self) -> None:
+        """Re-derive the GRg-gap spec from the config, leaving the gap where it is."""
+        # The GRg gap to productivity growth is itself an AR(1) around 0.
+        self._grg_gap_spec = self._config.gov_spending.gap_spec()
 
     def _model_inputs(self, values: dict[str, float], feedback: Any) -> None:
         """Set ``GRg`` (gap + employment stabilizer) and ``Nfe`` (log random walk).

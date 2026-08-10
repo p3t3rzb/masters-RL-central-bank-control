@@ -7,9 +7,15 @@ this module adds only the spec that encodes GROWTH's own fiscal stabilizer.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from economic_models.ground_truth.excitation.specs import AR1Spec
+import numpy as np
+
+from economic_models.ground_truth.excitation.specs import (
+    AR1Spec,
+    ExcitationJitter,
+    lognormal_factor,
+)
 
 
 @dataclass(frozen=True)
@@ -34,3 +40,26 @@ class GovSpendingSpec:
     def gap_spec(self) -> AR1Spec:
         """The gap to productivity growth as an :class:`AR1Spec` around 0."""
         return AR1Spec(sigma=self.gap_sigma, lower=-self.gap_clip, upper=self.gap_clip)
+
+    def perturbed(
+        self, rng: np.random.Generator, jitter: ExcitationJitter
+    ) -> "GovSpendingSpec":
+        """A neighbouring fiscal authority: same instrument, different reflexes.
+
+        ``stabilizer`` is redrawn under ``jitter.feedback`` rather than
+        ``jitter.scale``, because it is not an innovation size -- it is a
+        *reaction function*, the gain on the employment gap. Moving it is the
+        most consequential perturbation available here and the most defensible
+        one: how hard a government leans against a slump is legislation, it does
+        change, and a monetary policy fitted against one setting of it meets
+        another. It also changes the closed-loop dynamics rather than only the
+        forcing, which is precisely the kind of error a one-step residual
+        correction is being asked to catch.
+
+        ``gap_clip`` and ``bounds`` hold: both are the corridor.
+        """
+        return replace(
+            self,
+            gap_sigma=self.gap_sigma * lognormal_factor(rng, jitter.scale),
+            stabilizer=self.stabilizer * lognormal_factor(rng, jitter.feedback),
+        )

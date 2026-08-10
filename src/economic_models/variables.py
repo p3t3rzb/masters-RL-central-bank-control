@@ -22,7 +22,7 @@ model's hidden internals are owned by the concrete model itself.
 from __future__ import annotations
 
 from dataclasses import Field, dataclass, field, fields
-from typing import Any, ClassVar, Mapping, TypeVar
+from typing import Any, ClassVar, Mapping, Sequence, TypeVar
 
 T = TypeVar("T", bound="ValueSpace")
 
@@ -59,6 +59,15 @@ class ValueSpace:
     def from_dict(cls: type[T], values: Mapping[str, float]) -> T:
         """Build an instance by picking this space's names out of ``values``."""
         return cls(**{name: values[name] for name in cls.names()})
+
+    @classmethod
+    def from_row(cls: type[T], row: Sequence[float]) -> T:
+        """Build an instance from a positional row ordered like :meth:`names`.
+
+        The array form of :meth:`from_dict`, for the several places that carry a
+        run's levels as plain rows and have to turn one back into a typed value.
+        """
+        return cls(**{name: float(v) for name, v in zip(cls.names(), row)})
 
     def to_dict(self) -> dict[str, float]:
         """Flatten to a ``{name: value}`` dict the solver can consume."""

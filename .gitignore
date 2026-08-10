@@ -24,3 +24,5 @@ docs/
 
 # Generated datasets (regenerate with `python -m data_generation`)
 data/
+
+runs/

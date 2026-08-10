@@ -22,7 +22,10 @@ heavy-tailed: the proxies emit crisis draws.
 
 from __future__ import annotations
 
+import copy
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 import numpy as np
 import torch
@@ -33,6 +36,29 @@ from economic_models._torch import resolve_device
 from control.dsac.networks import QuantileCritic, SquashedGaussianPolicy
 from control.dsac.replay import Batch
 from control.dsac.risk import MeanRisk, RiskMeasure
+
+
+@contextmanager
+def _no_parameter_grads(module: nn.Module) -> Iterator[None]:
+    """Let gradients flow *through* ``module`` without accumulating *into* it.
+
+    For a loss term that scores one network's output under **another**, fixed,
+    network. :func:`torch.no_grad` is the wrong tool there and quietly so: it
+    detaches the result entirely, and when the thing being scored is an action
+    the caller's own policy reparameterised, detaching drops the very gradient
+    path the term exists to create -- leaving a term that has a plausible
+    *value* and no *effect*. Freezing the parameters instead keeps the path
+    through the input and stops the graph at this module's weights.
+    """
+    params = list(module.parameters())
+    flags = [p.requires_grad for p in params]
+    for p in params:
+        p.requires_grad_(False)
+    try:
+        yield
+    finally:
+        for p, flag in zip(params, flags):
+            p.requires_grad_(flag)
 
 
 class DSACAgent:
@@ -131,8 +157,39 @@ class DSACAgent:
 
     # -- learning ------------------------------------------------------------
 
-    def update(self, batch: Batch) -> dict[str, float]:
-        """One gradient step on the critics, the actor and the temperature."""
+    def update(
+        self,
+        batch: Batch,
+        *,
+        anchor: DSACAgent | None = None,
+        anchor_weight: float = 0.0,
+    ) -> dict[str, float]:
+        """One gradient step on the critics, the actor and the temperature.
+
+        ``anchor`` optionally pulls the actor toward another agent's policy, by
+        adding ``anchor_weight`` times an estimate of
+        ``KL(pi(.|s) || pi_anchor(.|s))`` to the actor's loss. It is off by
+        default and exists for one setting: a policy being fine-tuned **online in
+        an economy that cannot be rolled back** (see :mod:`control.live`), where
+        the deployed policy is the product of a hundred thousand training steps
+        and the online phase has a few hundred samples to argue with it. The
+        online update should be nudging that policy, not relearning it.
+
+        The estimate is the one-sample Monte-Carlo form on the batch's states,
+        ``E_{a ~ pi}[log pi(a|s) - log pi_anchor(a|s)]``, which is what the
+        reparameterised sample already in hand makes free -- and which is zero
+        exactly when the two policies agree, whatever the entropy temperature is
+        doing.
+
+        The anchor's *parameters* are frozen for the evaluation
+        (:func:`_no_parameter_grads`) rather than the whole term being taken
+        under :func:`torch.no_grad`. The difference is the whole term: both
+        halves are functions of the same reparameterised ``a``, so detaching the
+        anchor half leaves ``anchor_weight * E[log pi(a)]`` -- an entropy bonus
+        wearing a KL's name, which pulls the policy toward *uniform* rather than
+        toward the anchor, and does it with a weight chosen on the assumption it
+        was doing something else.
+        """
         obs = self._t(batch.obs)
         action = self._t(batch.action)
         reward = self._t(batch.reward)
@@ -158,6 +215,12 @@ class DSACAgent:
         fresh, logp, _ = self.actor.sample(obs)
         score = self.risk.aggregate(self._pessimistic(self.critics, obs, fresh))
         actor_loss = (alpha * logp - score).mean()
+        kl = torch.zeros((), device=self.device)
+        if anchor is not None and anchor_weight:
+            with _no_parameter_grads(anchor.actor):
+                anchor_logp = anchor.actor.log_prob(obs, fresh)
+            kl = (logp - anchor_logp).mean()
+            actor_loss = actor_loss + anchor_weight * kl
         self.actor_opt.zero_grad()
         actor_loss.backward()
         self.actor_opt.step()
@@ -174,6 +237,7 @@ class DSACAgent:
             "actor_loss": float(actor_loss.detach()),
             "alpha": self.alpha,
             "entropy": float(-logp.mean().detach()),
+            "anchor_kl": float(kl.detach()),
         }
 
     def _pessimistic(
@@ -211,6 +275,32 @@ class DSACAgent:
                 target.mul_(1.0 - self.tau).add_(self.tau * critic)
 
     # -- persistence ---------------------------------------------------------
+
+    def clone(self) -> DSACAgent:
+        """An independent copy: same weights, same optimiser state, no sharing.
+
+        For a caller that wants to *try* an update before committing to it -- the
+        online acceptance test of :mod:`control.live` trains a copy, scores it
+        against the deployed policy, and keeps whichever survives. A full deep
+        copy rather than a fresh agent with loaded weights, because the Adam
+        moments matter: an actor restarted with empty moments takes a different
+        first step than the one being compared against, which would make the test
+        measure the optimiser rather than the update.
+        """
+        return copy.deepcopy(self)
+
+    def set_lr(self, actor: float | None = None, critic: float | None = None) -> None:
+        """Retune the learning rates of an already-built agent.
+
+        The offline run and an online fine-tune want very different step sizes
+        from the *same* agent object (see :mod:`control.live`), and rebuilding it
+        to change one number would throw away the weights that are the point.
+        """
+        for lr, opt in ((actor, self.actor_opt), (critic, self.critic_opt)):
+            if lr is None:
+                continue
+            for group in opt.param_groups:
+                group["lr"] = lr
 
     def save(self, path: str | Path) -> None:
         """Write the actor, critics and temperature to ``path``."""

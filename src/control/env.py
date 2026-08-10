@@ -64,9 +64,42 @@ class EnvConfig:
     corridor outside which the economy counts as collapsed; ``action_bounds`` is
     the box the agent's normalised action is mapped onto; ``stabilize``
     re-applies GROWTH's fiscal response to the realised employment rate.
+
+    ``horizon`` caps an episode at that many steps of whatever future it drew,
+    and ``None`` runs the whole thing. It exists because the length of a *future*
+    and the length of an *episode* are separable questions: a deployment
+    (:mod:`control.live`) runs one future for hundreds of periods where training
+    cut the same bank into episodes of fifty, and both read the same world.
+
+    ``action_rate`` caps how fast a lever may move, as a fraction of its box **per
+    year**; ``None`` lets the agent swing it end to end between periods. It lives
+    **here**, in the environment, rather than being applied to the agent's output
+    by whoever happens to be running it. Real policy instruments have a slew rate
+    and the mandate has no smoothing term, so without it the agent is free to do
+    something no central bank does -- but a limit imposed outside the environment
+    is one the agent never learns, never trains against and is never evaluated
+    under, so the policy that gets optimised is not the policy that gets run. As
+    a property of the *instrument* it is part of the world, for the same reason
+    :class:`~control.world.FiscalStabilizer` is, and training, evaluation,
+    synthetic rollouts and a live deployment all read it from one place.
+
+    Annualized, like every other rate in this project (the excitation's AR(1)
+    persistences and variances, the mandate's growth rates), and for the reason
+    that convention exists: a *per-step* cap is a different economic statement at
+    every ``dt``. At 0.1 per step a lever crosses 40% of its box a year at
+    quarterly and 120% at monthly, so a number tuned at one frequency silently
+    means something else at another -- the same trap
+    :func:`~control.dsac.train.taylor_policy` documents for its own gain. Stated
+    per year it means one thing everywhere, and the environment converts.
+
+    It costs no extra episode state: the previous lever setting is already in the
+    trailing exogenous block, which is also why a rate-limited environment stays
+    Markov in its own observation (the action columns are part of it).
     """
 
     collapse_penalty: float = -25.0
+    horizon: int | None = None
+    action_rate: float | None = None
     er_bounds: tuple[float, float] = (0.5, 1.5)
     pi_bounds: tuple[float, float] = (-0.2, 0.5)
     action_bounds: Mapping[str, tuple[float, float]] = field(
@@ -173,14 +206,70 @@ class CentralBankEnv:
 
     @property
     def horizon(self) -> int:
-        """Steps in the current episode (the length of its exogenous future)."""
-        return 0 if self._episode is None else len(self._episode)
+        """Steps in the current episode: its future's length, or the cap."""
+        if self._episode is None:
+            return 0
+        if self.config.horizon is None:
+            return len(self._episode)
+        return min(len(self._episode), self.config.horizon)
+
+    # -- where the episode currently stands ----------------------------------
+    #
+    # Read-only, and for one caller: something that wants to branch a *different*
+    # model off the position this episode has reached (see
+    # :mod:`control.live.deploy`, which rolls a corrected proxy forward from the
+    # states a live ground-truth run visited). An observation is a pure function
+    # of these three, so handing them out lets that caller reproduce this
+    # environment's own bookkeeping instead of re-deriving it and drifting.
+
+    @property
+    def states(self) -> np.ndarray | None:
+        """The trailing ``(2, n_state)`` block of state levels, or ``None``."""
+        return self._states
+
+    @property
+    def exog(self) -> np.ndarray | None:
+        """The trailing ``(2, n_exog)`` block of exogenous levels, or ``None``."""
+        return self._exog
+
+    @property
+    def belief(self) -> Any:
+        """The observer's encoder belief behind the latest observation."""
+        return self._belief
+
+    @property
+    def step_index(self) -> int:
+        """Steps taken in the current episode."""
+        return self._t
 
     def to_actions(self, action: np.ndarray) -> Actions:
         """Map a normalised ``[-1, 1]`` vector onto the economic action box."""
         unit = (np.clip(np.asarray(action, dtype=float), -1.0, 1.0) + 1.0) / 2.0
         levels = self._low + unit * (self._high - self._low)
         return self.interface.actions.from_dict(dict(zip(self._action_names, levels)))
+
+    def apply_action_rate(
+        self, action: np.ndarray, prev_exog: np.ndarray
+    ) -> np.ndarray:
+        """The normalised action after the instrument's slew limit.
+
+        ``prev_exog`` is the exogenous level row the move is measured from -- the
+        trailing one of an episode, or a branch point's, so a caller simulating
+        this environment's dynamics with another model limits by the *same* rule
+        against the *same* reference rather than a re-stated copy of it.
+
+        The two factors: the normalised box is two units wide, and the configured
+        rate is per year while a step is ``dt`` of one.
+
+        A no-op when :attr:`EnvConfig.action_rate` is ``None``, beyond the clip
+        into the box that :meth:`to_actions` would apply anyway.
+        """
+        raw = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
+        if self.config.action_rate is None:
+            return raw
+        previous = self.to_normalised(self._actions_of(prev_exog).to_dict())
+        step = 2.0 * self.config.action_rate * self._world.dt
+        return np.clip(raw, previous - step, previous + step)
 
     def to_normalised(self, levels: Mapping[str, float]) -> np.ndarray:
         """Map economic action levels back onto the normalised ``[-1, 1]`` vector.
@@ -293,7 +382,12 @@ class CentralBankEnv:
         parameters = self.interface.parameters.from_dict(
             dict(zip(self._param_names, params))
         )
-        actions = self.to_actions(action)
+        # The slew limit is measured from the levers as they actually stand, which
+        # the trailing exogenous row already records -- so every draw from this
+        # position limits against the same reference, and nothing has to be
+        # carried across a branch.
+        applied = self.apply_action_rate(action, prev_exog)
+        actions = self.to_actions(applied)
         hidden = self._hidden_row(self._t)
 
         try:
@@ -301,7 +395,7 @@ class CentralBankEnv:
         except (ValueError, CalculationError, SolutionNotFoundError, RuntimeError) as exc:
             return self._collapse(str(exc))
 
-        levels = np.array([getattr(state, name) for name in self.interface.state.names()])
+        levels = self.levels_of(state)
         if not self._plausible(state, levels):
             return self._collapse("state left the plausibility corridor")
 
@@ -332,11 +426,22 @@ class CentralBankEnv:
             obs=obs,
             reward=reward,
             terminated=False,
-            truncated=self._t + 1 >= len(self._episode),
+            truncated=self._t + 1 >= self.horizon,
             info={
                 "reward_terms": terms,
                 "state": state,
+                # The exogenous row *as applied*, stabilizer included -- which is
+                # not the episode's frozen row, and is what a caller shadowing
+                # this step with its own model has to be driven by.
+                "parameters": parameters,
                 "actions": actions,
+                # The normalised action *as applied*, slew limit included, which
+                # is not necessarily the one the caller asked for. A replay
+                # buffer has to store this one: the reward and the next state are
+                # what this action produced, and pairing them with a request the
+                # environment declined teaches the critic a transition that never
+                # happened.
+                "action": applied,
                 "episode": self._episode.index,
             },
             states=states,
@@ -351,6 +456,24 @@ class CentralBankEnv:
         self._obs = transition.obs
         self._belief = transition.belief
         self._t += 1
+
+    # -- the collapse rules, addressable from outside a step ------------------
+
+    def plausible(self, state: State) -> bool:
+        """Whether ``state`` is an economy this environment would keep running.
+
+        The corridor :meth:`step` applies, exposed so a caller simulating this
+        environment's dynamics with another model (a corrected proxy, say) marks
+        a collapse by the *same* rule rather than a re-stated copy of it.
+        """
+        return self._plausible(state, self.levels_of(state))
+
+    def levels_of(self, state: State) -> np.ndarray:
+        """A row of state levels from a :class:`State`, in the interface's order."""
+        values = state.to_dict()
+        return np.array(
+            [values[name] for name in self.interface.state.names()], dtype=float
+        )
 
     # -- internals -----------------------------------------------------------
 
@@ -396,7 +519,7 @@ class CentralBankEnv:
         """
         assert self._obs is not None and self._episode is not None
         assert self._states is not None and self._exog is not None
-        remaining = max(1, len(self._episode) - self._t)
+        remaining = max(1, self.horizon - self._t)
         return Transition(
             obs=self._obs,
             reward=self.config.collapse_penalty * remaining,
