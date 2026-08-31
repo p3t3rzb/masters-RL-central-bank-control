@@ -38,17 +38,19 @@ Reverting to the policy we already had is a successful outcome for a safe system
 and is reported as one. Each is separately switchable (:meth:`LiveConfig.guarding`)
 so the ablation can say which one paid for itself.
 
-The levers' **slew limit is not on that list**, and deliberately. It used to be:
-a clip applied to the agent's action inside this loop and nowhere else. But a
-constraint that exists only at deployment is one the agent never trained against,
-never was evaluated under, and does not appear in the rollouts the acceptance
-test scores -- so the policy being optimised, the policy being tested and the
-policy being run were three different controllers, and two policies saturating
-the limit in the same direction emitted identical actions no matter how much
-their parameters differed. It now lives in
-:attr:`~control.env.EnvConfig.action_rate`, as a property of the instrument
-rather than a restraint on one agent, and training, evaluation, the references
-and the synthetic rollouts all read it from there.
+The levers' **finite speed is not on that list**, and deliberately. It is not a
+guardrail at all but the instrument itself: the policy's action is a *step*, the
+levers integrate it, and :attr:`~control.env.EnvConfig.delta_rate` fixes the
+maximum speed -- during training, in the synthetic rollouts, in the acceptance
+test and here, all read from one place. (An earlier design applied a slew clip
+to the agent's output inside this loop and nowhere else, which meant the policy
+being optimised, the policy being tested and the policy being run were three
+different controllers; the delta parametrization retired both the clip and the
+mismatch.) The references are the one deliberate exemption: they run under a
+:func:`~control.dsac.train.free_instrument` configuration, whose instrument is
+fast enough that :meth:`~control.env.CentralBankEnv.toward` lands on a rule's
+target within the period -- the textbook rules are the fixed bars, and the
+speed limit is the agent's problem alone.
 
 Everything here is testable before the live run by *rehearsing* it: the ground
 truth is unavailable to the bank but available in the lab, so :func:`rehearse`
@@ -59,10 +61,14 @@ one-shot deployments, which is the right object to set hyperparameters against.
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass, field
-from typing import Any, Callable
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, Callable
 
 import numpy as np
+import torch
 
 from economic_models.proxy import BaseProxyModel
 from economic_models.run import Run
@@ -78,6 +84,7 @@ from control.dsac.train import (
     build_truth_env,
     calibration_actions,
     constant_policy,
+    free_instrument,
     reset_policy,
     taylor_policy,
 )
@@ -102,6 +109,9 @@ from control.live.residual import (
 )
 from control.rewards import RewardContext
 from control.world import Episode, NullStabilizer, TrainingWorld
+
+if TYPE_CHECKING:
+    from control.live.oracle import OracleConfig
 
 #: The forcing families a deployment can forecast its exogenous environment with.
 FORCINGS = ("var", "bootstrap", "oracle")
@@ -129,6 +139,26 @@ class LiveConfig:
     generations: int = 5  #: policy updates of synthetic data retained
     real_fraction: float = 0.2  #: rho, the real share of a minibatch
     batch: int = 256  #: minibatch size
+    #: deliberate lever excitation, as a standard deviation in **normalised**
+    #: action units (the box is [-1, 1]), added to what the policy asks for.
+    #:
+    #: Off by default, and switching it on is a real decision rather than a
+    #: tuning knob: it spends mandate return to buy identification. The
+    #: correction is a function of a design that carries the action block, and a
+    #: deployment that holds its levers on one path teaches that block nothing --
+    #: the coefficients stay at their prior and the corrected model's *response*
+    #: to a lever is whatever the offline proxy already believed. That is
+    #: precisely the direction in which a surrogate fitted on one history is
+    #: least trustworthy and the direction the policy gradient lives in, so a run
+    #: that never moves the instrument off-policy cannot learn the thing it most
+    #: needs to. Excitation is the classical answer and the classical cost.
+    #:
+    #: Applied identically to the adapting and the frozen arm, off a stream of
+    #: its own, so the two remain paired step for step and the comparison
+    #: isolates *learning from* the excited data rather than the excitation
+    #: itself. The levers still integrate at instrument speed: this perturbs the
+    #: requested step, it does not bypass the instrument.
+    explore: float = 0.0
     recency_decay: float = 0.99  #: geometric weight on branch-point age
     #: what a *synthetic* collapse is charged against. The environment prices a
     #: collapse per remaining step of an episode, and a live run has no episode
@@ -176,32 +206,6 @@ class LiveConfig:
     guard_accept: bool = True  #: score a candidate before letting it act
     guard_monitor: bool = True  #: let the monitor freeze learning when it trips
     guard_fallback: bool = True  #: hand control back after enough trouble
-    #: run the live environment under the instrument's slew limit. Unlike the
-    #: others this is not a restraint on *learning* -- it is a property of the
-    #: levers, shared with training, evaluation and the references -- so turning
-    #: it off is a deliberate train/deploy mismatch: a policy optimised under a
-    #: rate-limited instrument, run without one. Kept switchable because that
-    #: mismatch is exactly what the ablation is asking about.
-    guard_rate_limit: bool = True
-    #: run the Taylor rule and the calibration baseline under the slew limit too.
-    #: On by default because the limit is a property of the *instrument*: a
-    #: reference exempt from it operates levers nobody has, and the deployment
-    #: would be paying a cost its own baseline does not. It is not a free choice
-    #: either way -- limiting Taylor materially **helps** it, by damping the
-    #: high-gain oscillation :func:`~control.dsac.train.taylor_policy` documents
-    #: at sub-quarterly ``dt``, so this makes the bar harder rather than easier.
-    #: Off recovers the textbook rules unmodified, at the cost of comparing two
-    #: policies operating different instruments.
-    limit_references: bool = True
-    #: the instrument's slew limit *for the live run*, as a fraction of the box
-    #: per year. ``None`` inherits whatever the offline run was trained under
-    #: (:attr:`~control.dsac.train.TrainConfig.action_rate`), which is the
-    #: coherent setting: a limit the agent trained against is one it learned to
-    #: work with, and the acceptance test then scores the controller that will
-    #: actually act. A number here deliberately breaks that tie -- deploying
-    #: under a tighter instrument than the one trained for -- and is an
-    #: assumption to report rather than a default to rely on.
-    action_rate: float | None = None
     actor_lr: float = 3e-5  #: ten times below the training-time rate
     anchor_weight: float = 1.0  #: strength of the KL pull toward the deployed policy
     accept_branches: int = 128  #: branch points the acceptance test scores over
@@ -229,6 +233,24 @@ class LiveConfig:
     #: that horizon is scoring the correction's divergence rather than the policy.
     accept_steps: int | None = None
     accept_alpha: float = 0.1  #: tail fraction the test compares under
+    #: score candidates on branch states the synthetic rollouts did **not** start
+    #: from, by splitting the real buffer on arrival parity
+    #: (:meth:`~control.live.buffer.RealBuffer.branches`).
+    #:
+    #: Off, the acceptance test is in-sample in every respect but the draw: the
+    #: candidate is improved on rollouts from a pool of states and then scored on
+    #: rollouts from that same pool, through the same model, under the same
+    #: forcing. That test can say a candidate is better where it was fitted; it
+    #: cannot say it will be better anywhere else, which is the question a
+    #: deployment is asking. On, the two pools are disjoint, so the margin is a
+    #: held-out quantity -- the only held-out quantity a run with one economy and
+    #: no reset can construct.
+    #:
+    #: It is not a cure for a biased model: both pools are scored *through* the
+    #: corrected proxy, so a model that ranks policies wrongly ranks them wrongly
+    #: on either half. What it catches is the other failure -- a candidate that
+    #: has learned the particular states it was rolled from.
+    holdout_branches: bool = False
     #: consecutive rejections before handing control back. A rejection is a
     #: *no-op* -- the incumbent keeps acting and nothing was risked -- so this is
     #: a much weaker signal of trouble than the monitor tripping, and treating a
@@ -518,10 +540,10 @@ class SyntheticRollouts:
             # unconstrained controller and the acceptance test scores a policy
             # that cannot be run -- the two buffers would not be mixable, which
             # is the one thing this class exists to guarantee.
-            action = self.env.apply_action_rate(policy(obs), exog[-1])
+            position, action = self.env.resolve_action(policy(obs), exog[-1])
             params = self.stabilizer.apply(path[j], float(states[-1][self._er]))
             parameters = interface.parameters.from_row(params)
-            actions = self.env.to_actions(action)
+            actions = self.env.to_actions(position)
 
             penalty = self.env.config.collapse_penalty * max(
                 1, self.live.synthetic_horizon - j
@@ -595,13 +617,13 @@ def deploy(
     world, observer = result.world, result.observer
     rng = np.random.default_rng(live.seed + seed)
 
-    # The slew limit is the environment's, not a filter on the agent's output, so
-    # the deployment, its synthetic rollouts and the references all act under the
-    # same instrument -- and under the one the offline run was trained against
-    # unless this configuration deliberately says otherwise.
+    # The instrument's speed is the environment's, not a filter on the agent's
+    # output, so the deployment, its synthetic rollouts and the references all
+    # act under the same instrument -- the one the offline run was trained
+    # against.
     env = build_truth_env(
         world, observer, result.env.reward, config, seed=seed,
-        horizon=live.live_steps, action_rate=_action_rate(live, config),
+        horizon=live.live_steps,
     )
     n_feat = len(result.proxy.transform.state_feature_names)
 
@@ -662,10 +684,24 @@ def deploy(
     obs, _ = env.reset(seed=seed, episode=episode)
     tracker = _OutcomeTracker(env, world)
     rejections = 0
+    # A stream of its own, keyed to the deployment rather than to the arm: the
+    # frozen reference has no updates to draw for and would otherwise consume the
+    # main stream at a different rate, so a shared generator would hand the two
+    # arms different excitation and quietly unpair them.
+    exciter = np.random.default_rng(live.seed + 7919 + seed)
+    # Which half of the branch states trains the candidate and which scores it.
+    # ``None`` on both is the unsplit behaviour: one pool, used for both.
+    fit_half = 0 if live.holdout_branches else None
+    test_half = 1 if live.holdout_branches else None
 
     steps = min(live.live_steps, len(episode))
     for t in range(1, steps + 1):
         requested = agent.act(obs, deterministic=True)
+        if live.explore:
+            requested = np.clip(
+                requested + live.explore * exciter.standard_normal(len(requested)),
+                -1.0, 1.0,
+            )
         next_obs, reward, terminated, truncated, info = env.step(requested)
         # What the instrument actually did, which is what the buffer must record.
         action = info.get("action", requested)
@@ -749,7 +785,7 @@ def deploy(
             # the clock a deployment can afford to pay estimation on.
             forcing.refit()
             k = _rollout_length(live, monitor)
-            _generate(rollouts, real, synthetic, agent, live, k, rng)
+            _generate(rollouts, real, synthetic, agent, live, k, rng, half=fit_half)
             candidate = agent.clone()
             for _ in range(live.gradient_steps):
                 candidate.update(
@@ -757,14 +793,27 @@ def deploy(
                     anchor=frozen,
                     anchor_weight=anchor_weight,
                 )
+            risk = live.accept_risk or config.risk
             test = (
                 _accept(
                     candidate, agent, rollouts, real, live,
-                    risk=live.accept_risk or config.risk,
-                    rng_seed=live.seed + t,
+                    risk=risk, rng_seed=live.seed + t, half=test_half,
                 )
                 if live.guarding("accept")
                 else AcceptTest(margin=0.0, error=0.0, accepted=True)
+            )
+            # The same comparison on the states the candidate was rolled from.
+            # It decides nothing -- it is the in-sample twin of the margin that
+            # does, and the gap between the two is what "the candidate learned
+            # these particular states" looks like when it is measured rather
+            # than assumed.
+            insample = (
+                _accept(
+                    candidate, agent, rollouts, real, live,
+                    risk=risk, rng_seed=live.seed + t, half=fit_half,
+                ).margin
+                if live.holdout_branches and live.guarding("accept")
+                else None
             )
             accepted = test.accepted
             record.events_.append(
@@ -773,6 +822,7 @@ def deploy(
                     "kind": "accepted" if accepted else "rejected",
                     "k": k,
                     "margin": test.margin,
+                    **({} if insample is None else {"margin_insample": insample}),
                     "error": test.error,
                 }
             )
@@ -819,25 +869,18 @@ def run_reference(
     per-period record, or the figures would be comparing a deployment against a
     differently-measured thing.
 
-    That now includes the instrument's slew limit, which it did not while the
-    limit was a filter on the agent's output. A rate limit that lives in the
-    environment is a fact about the levers rather than a constraint on one
-    policy, so a reference exempt from it would be a reference operating an
-    instrument nobody has -- and the deployment would be paying a cost its
-    baseline does not. :attr:`LiveConfig.limit_references` switches that off for
-    anyone who wants the textbook rules unmodified instead.
-
-    Note that a constant baseline is only *nominally* unaffected: it holds its
-    levers still, but it does not start at them. The economy hands over wherever
-    the history left it, so a limited calibration run spends its first few
-    periods travelling to its own setting.
+    The environment is the same in everything but the instrument's speed: a
+    reference is a rule stated in lever levels, and it is run under a
+    :func:`~control.dsac.train.free_instrument` configuration -- one period's
+    move spans the whole box, so
+    :meth:`~control.env.CentralBankEnv.toward` lands on the rule's target within
+    the period and the textbook rule is compared unmodified. The speed limit is
+    the *agent's* problem, deliberately: the references are the fixed bars, not
+    competitors under its constraints.
     """
     env = build_truth_env(
-        result.world, result.observer, result.env.reward, result.config, seed=seed,
-        horizon=live.live_steps,
-        action_rate=(
-            _action_rate(live, result.config) if live.limit_references else None
-        ),
+        result.world, result.observer, result.env.reward,
+        free_instrument(result.config), seed=seed, horizon=live.live_steps,
     )
     policies = {
         "taylor": lambda: taylor_policy(
@@ -877,6 +920,86 @@ def run_reference(
 # -- the rehearsal protocol --------------------------------------------------
 
 
+def _rehearse_one(
+    result: TrainingResult,
+    episode: Episode,
+    live: LiveConfig,
+    seeds: tuple[np.ndarray, np.ndarray],
+    references: tuple[str, ...],
+    oracle: "OracleConfig | None",
+    *,
+    seed: int,
+    verbose: bool,
+) -> dict[str, RunRecord]:
+    """One future's complete rehearsal: both arms, the references, the oracle.
+
+    The unit the futures loop repeats and the unit a parallel rehearsal ships to
+    a worker, so it must depend on nothing but its arguments. Torch's global
+    stream is re-seeded per future for the same reason: the adapting arm's
+    updates draw from it, and a future whose draws depend on which futures ran
+    before it (or beside it, in a pool) would make the two execution modes
+    different experiments. Seeded, they are the same experiment run in either
+    order.
+    """
+    torch.manual_seed(live.seed + seed)
+    out: dict[str, RunRecord] = {}
+    for adapt in (True, False):
+        record = deploy(
+            result, episode, live, seed_rows=seeds, seed=seed,
+            adapt=adapt, verbose=verbose,
+        )
+        out[record.name] = record
+    for name in references:
+        record = run_reference(result, episode, name, live, seed=seed)
+        out[name] = record
+        if verbose:
+            print(f"  {name}: return {record.total:9.1f} over {len(record)} steps")
+    if oracle is not None:
+        # Imported here rather than at the top: the oracle module builds on
+        # this one, and this call is the single place the dependency points
+        # back the other way.
+        from control.live.oracle import optimal_run
+
+        record = optimal_run(
+            result, episode, live, oracle, seed=seed, verbose=verbose
+        )
+        out["optimal"] = record
+        if verbose:
+            print(f"  optimal: return {record.total:9.1f} over {len(record)} steps")
+    return out
+
+
+#: One worker's share of a parallel rehearsal, set once by :func:`_worker_init`.
+#: A module global because a process pool has no other place for per-worker
+#: state; nothing outside these two functions may touch it.
+_WORKER: tuple[TrainingResult, LiveConfig, tuple, tuple, Any] | None = None
+
+
+def _worker_init(
+    result: TrainingResult,
+    live: LiveConfig,
+    seeds: tuple[np.ndarray, np.ndarray],
+    references: tuple[str, ...],
+    oracle: "OracleConfig | None",
+) -> None:
+    """Receive the (pickled) offline stack once per worker, not once per future."""
+    global _WORKER
+    # One torch thread per worker: the workers are the parallelism, and a pool
+    # of them each spawning intra-op threads oversubscribes the machine (see
+    # the DSAC dispatch-bound finding -- one thread is no slower per update).
+    torch.set_num_threads(1)
+    _WORKER = (result, live, seeds, references, oracle)
+
+
+def _worker_rehearse(j: int, episode: Episode, seed: int) -> tuple[int, dict[str, RunRecord]]:
+    """One future's rehearsal inside a worker, tagged with its position."""
+    assert _WORKER is not None, "worker used before _worker_init"
+    result, live, seeds, references, oracle = _WORKER
+    return j, _rehearse_one(
+        result, episode, live, seeds, references, oracle, seed=seed, verbose=False
+    )
+
+
 def rehearse(
     result: TrainingResult,
     live: LiveConfig | None = None,
@@ -884,6 +1007,8 @@ def rehearse(
     futures: int = 8,
     first: int | None = None,
     references: tuple[str, ...] = ("taylor", "calibration"),
+    oracle: "OracleConfig | None" = None,
+    workers: int = 1,
     verbose: bool = True,
 ) -> RehearsalResult:
     """Replay the whole deployment on held-out futures: a distribution, not a run.
@@ -917,6 +1042,27 @@ def rehearse(
     the :class:`LiveConfig` and the futures the result is reported on must
     themselves be disjoint. The references are rolled through the *same* futures
     under the *same* seeds, so every comparison is paired.
+
+    ``oracle`` additionally computes the **optimal run** on every future -- the
+    lever path a genetic search finds with the ground truth in hand
+    (:func:`~control.live.oracle.optimal_run`), logged as one more paired
+    policy named ``"optimal"``. Lab-only, like the oracle forcing, and by far
+    the dearest thing here: every fitness evaluation is a full ground-truth
+    run, which is why it is off unless asked for and why
+    :attr:`~control.live.oracle.OracleConfig.cache` exists.
+
+    ``workers`` rehearses that many futures concurrently, in spawned processes
+    each holding its own copy of the offline stack (0 sizes the pool to the
+    machine). The futures are independent by construction -- that is the whole
+    premise of a rehearsal -- and torch's stream is seeded per future in either
+    mode, so the parallel run is the same experiment as the sequential one:
+    the torch-free runs (the references and the oracle) land bit-identical,
+    the two agent arms to float noise (torch's CPU kernels are not
+    bit-reproducible across process boundaries), and each future's adapting
+    and frozen arms share one process either way, so their *paired* difference
+    is never crossed by that noise. Inside a pool the oracle's own worker pool
+    is collapsed to one process: the futures are already the parallelism, and
+    nested pools oversubscribe.
     """
     live = live or LiveConfig()
     dedicated = len(result.world.deploy_futures) > 0
@@ -931,22 +1077,59 @@ def rehearse(
         )
     seeds = residual_seed(result, live, verbose=verbose)
     out = RehearsalResult(config=live)
-    out.runs_ = {name: [] for name in ("adapting", "frozen", *references)}
+    names = (
+        "adapting", "frozen", *references,
+        *(("optimal",) if oracle is not None else ()),
+    )
+    out.runs_ = {name: [] for name in names}
 
-    for j, episode in enumerate(bank):
-        if verbose:
-            print(f"rehearsal {j + 1}/{len(bank)}: future #{episode.index}")
-        for adapt in (True, False):
-            record = deploy(
-                result, episode, live, seed_rows=seeds, seed=first + j,
-                adapt=adapt, verbose=verbose,
-            )
-            out.runs_[record.name].append(record)
-        for name in references:
-            record = run_reference(result, episode, name, live, seed=first + j)
-            out.runs_[name].append(record)
+    if workers != 1 and len(bank) > 1:
+        pool_size = min(
+            len(bank), workers if workers else max(1, (os.cpu_count() or 2) - 2)
+        )
+    else:
+        pool_size = 1
+
+    if pool_size == 1:
+        rehearsed = []
+        for j, episode in enumerate(bank):
             if verbose:
-                print(f"  {name}: return {record.total:9.1f} over {len(record)} steps")
+                print(f"rehearsal {j + 1}/{len(bank)}: future #{episode.index}")
+            rehearsed.append(
+                _rehearse_one(
+                    result, episode, live, seeds, references, oracle,
+                    seed=first + j, verbose=verbose,
+                )
+            )
+    else:
+        # The futures are the parallelism, so the oracle inside each worker
+        # keeps to one process -- a pool of pools oversubscribes the machine.
+        oracle_one = None if oracle is None else replace(oracle, workers=1)
+        rehearsed = [None] * len(bank)
+        with ProcessPoolExecutor(
+            pool_size,
+            # Spawn rather than fork, explicitly: the parent holds torch and a
+            # solver mid-state, neither of which survives forking safely.
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=_worker_init,
+            initargs=(result, live, seeds, references, oracle_one),
+        ) as pool:
+            pending = {
+                pool.submit(_worker_rehearse, j, episode, first + j)
+                for j, episode in enumerate(bank)
+            }
+            for done in as_completed(pending):
+                j, records = done.result()
+                rehearsed[j] = records
+                if verbose:
+                    line = ", ".join(
+                        f"{name} {records[name].total:.1f}" for name in names
+                    )
+                    print(f"rehearsal of future #{bank[j].index}: {line}")
+
+    for records in rehearsed:
+        for name in names:
+            out.runs_[name].append(records[name])
     return out
 
 
@@ -961,10 +1144,14 @@ def _generate(
     live: LiveConfig,
     k: int,
     rng: np.random.Generator,
+    *,
+    half: int | None = None,
 ) -> None:
     """Fill the synthetic buffer with fresh on-policy data from real states."""
     policy = agent_policy(agent, deterministic=False)
-    for branch in real.branches(live.branch_points, rng, decay=live.recency_decay):
+    for branch in real.branches(
+        live.branch_points, rng, decay=live.recency_decay, half=half
+    ):
         _, rows = rollouts.roll(branch, policy, k, rng)
         for obs, action, reward, next_obs, done in rows:
             synthetic.add(obs, action, reward, next_obs, done)
@@ -1024,6 +1211,7 @@ def _accept(
     *,
     risk: str,
     rng_seed: int,
+    half: int | None = None,
 ) -> AcceptTest:
     """Score a candidate policy against the incumbent before letting it act.
 
@@ -1069,7 +1257,9 @@ def _accept(
     exists to catch.
     """
     rng = np.random.default_rng(rng_seed)
-    branches = real.branches(live.accept_branches, rng, decay=live.recency_decay)
+    branches = real.branches(
+        live.accept_branches, rng, decay=live.recency_decay, half=half
+    )
     scores = {}
     for name, agent in (("deployed", deployed), ("candidate", candidate)):
         policy = agent_policy(agent, deterministic=True)
@@ -1133,20 +1323,6 @@ def _rollout_length(live: LiveConfig, monitor: OODMonitor) -> int:
     if ratio < 0.5:
         return live.rollout_max
     return live.rollout_length
-
-
-def _action_rate(live: LiveConfig, config: TrainConfig) -> float | None:
-    """The slew limit the live environment should run under.
-
-    ``None`` on :class:`LiveConfig` inherits the offline run's, which is the
-    coherent case -- the agent trained against that instrument, so the policy
-    being deployed is the policy that was optimised. Switching the guardrail off
-    removes the limit for the live run only, which is the ablation and is a
-    genuine train/deploy mismatch rather than a milder setting.
-    """
-    if not live.guarding("rate_limit"):
-        return None
-    return config.action_rate if live.action_rate is None else live.action_rate
 
 
 class _OutcomeTracker:

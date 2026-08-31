@@ -20,6 +20,9 @@ policy from two hundred samples.
 * :mod:`~control.live.monitor` -- the out-of-distribution tripwire that freezes
   learning when the economy leaves the region the whole apparatus was calibrated
   in.
+* :mod:`~control.live.oracle` -- the optimal run: a genetic search over the
+  bank's own lever paths with the ground truth in hand, the lab-only bound the
+  figures can score every policy against.
 * :mod:`~control.live.deploy` -- the loop itself, and :func:`~control.live.deploy.rehearse`,
   which replays it on held-out futures to turn one-shot deployment into a
   distribution that can be tuned against.
@@ -51,6 +54,7 @@ from control.live.forcing import (
     VARForcing,
 )
 from control.live.monitor import MonitorReading, OODMonitor
+from control.live.oracle import OracleConfig, optimal_run
 from control.live.residual import (
     BlockBootstrapResidualNoise,
     GaussianResidualNoise,
@@ -84,6 +88,8 @@ __all__ = [
     "seed_from_run",
     "OODMonitor",
     "MonitorReading",
+    "OracleConfig",
+    "optimal_run",
     "LiveConfig",
     "RunRecord",
     "RehearsalResult",

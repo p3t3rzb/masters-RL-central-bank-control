@@ -42,14 +42,17 @@ from control.observation import Observer
 from control.rewards import RewardContext, RewardFunction
 from control.world import Episode, EpisodeBank
 
-#: The action box, defaulting to the AR(1) clip bands the excitation drew these
-#: levers inside -- and therefore the region a proxy was fit in. Widening it puts
-#: the agent off the surrogate's training support, which needs an OOD guard, not
-#: just a bigger number.
+#: The action box. Deliberately ~50% wider than the AR(1) clip bands the
+#: excitation drew these levers inside (Rbbar (0.015, 0.055), NCAR (0.07, 0.14),
+#: ro (0.03, 0.09)) -- and therefore wider than the region a proxy was fit in.
+#: An agent steering a lever beyond the old bands is off the surrogate's
+#: training support, where its predictions are unvalidated: results earned out
+#: there need an OOD guard or a proxy refit on matching excitation, not just
+#: this bigger number.
 ACTION_BOUNDS: Mapping[str, tuple[float, float]] = {
-    "Rbbar": (0.015, 0.055),
-    "NCAR": (0.07, 0.14),
-    "ro": (0.03, 0.09),
+    "Rbbar": (0.005, 0.075),
+    "NCAR": (0.05, 0.175),
+    "ro": (0.015, 0.12),
 }
 
 
@@ -71,35 +74,46 @@ class EnvConfig:
     (:mod:`control.live`) runs one future for hundreds of periods where training
     cut the same bank into episodes of fifty, and both read the same world.
 
-    ``action_rate`` caps how fast a lever may move, as a fraction of its box **per
-    year**; ``None`` lets the agent swing it end to end between periods. It lives
-    **here**, in the environment, rather than being applied to the agent's output
-    by whoever happens to be running it. Real policy instruments have a slew rate
-    and the mandate has no smoothing term, so without it the agent is free to do
-    something no central bank does -- but a limit imposed outside the environment
-    is one the agent never learns, never trains against and is never evaluated
-    under, so the policy that gets optimised is not the policy that gets run. As
-    a property of the *instrument* it is part of the world, for the same reason
+    ``delta_rate`` is the instrument's speed. The policy's ``[-1, 1]`` vector is
+    a fraction of the period's maximum move, not a position in the box: the
+    levers integrate it -- ``position += action * step`` -- and ``delta_rate``
+    fixes that maximum as a fraction of the box **per year**. The parametrization
+    *is* the constraint. Every output short of the box's edge is a distinct
+    feasible move, so there is no censored region with a dead gradient -- the
+    failure mode of the slew clip this replaced, under which two policies
+    saturating the limit in the same direction emitted identical moves however
+    much their outputs differed -- and the entropy bonus explores rates of change
+    (a smooth walk over the box) instead of positions (white noise across it).
+    Real policy instruments have a finite speed and the mandate has no smoothing
+    term, so the speed lives **here**, in the environment, rather than being
+    applied to the agent's output by whoever happens to be running it: as a
+    property of the *instrument* it is part of the world, for the same reason
     :class:`~control.world.FiscalStabilizer` is, and training, evaluation,
-    synthetic rollouts and a live deployment all read it from one place.
+    synthetic rollouts and a live deployment all read it from one place. A policy
+    stated in *levels* (the Taylor rule, a constant baseline) drives an
+    instrument of this kind through :meth:`CentralBankEnv.toward` -- though the
+    references are deliberately scored under a
+    :func:`~control.dsac.train.free_instrument` configuration, fast enough not
+    to constrain them: the speed is the agent's problem, and the textbook rules
+    are compared unmodified.
 
     Annualized, like every other rate in this project (the excitation's AR(1)
     persistences and variances, the mandate's growth rates), and for the reason
-    that convention exists: a *per-step* cap is a different economic statement at
-    every ``dt``. At 0.1 per step a lever crosses 40% of its box a year at
-    quarterly and 120% at monthly, so a number tuned at one frequency silently
-    means something else at another -- the same trap
+    that convention exists: a *per-step* maximum is a different economic
+    statement at every ``dt``. At 0.1 per step a lever crosses 40% of its box a
+    year at quarterly and 120% at monthly, so a number tuned at one frequency
+    silently means something else at another -- the same trap
     :func:`~control.dsac.train.taylor_policy` documents for its own gain. Stated
     per year it means one thing everywhere, and the environment converts.
 
-    It costs no extra episode state: the previous lever setting is already in the
-    trailing exogenous block, which is also why a rate-limited environment stays
-    Markov in its own observation (the action columns are part of it).
+    It costs no extra episode state: the position being integrated from is
+    already in the trailing exogenous block, which is also why the environment
+    stays Markov in its own observation (the action columns are part of it).
     """
 
     collapse_penalty: float = -25.0
     horizon: int | None = None
-    action_rate: float | None = None
+    delta_rate: float = 0.4
     er_bounds: tuple[float, float] = (0.5, 1.5)
     pi_bounds: tuple[float, float] = (-0.2, 0.5)
     action_bounds: Mapping[str, tuple[float, float]] = field(
@@ -248,28 +262,60 @@ class CentralBankEnv:
         levels = self._low + unit * (self._high - self._low)
         return self.interface.actions.from_dict(dict(zip(self._action_names, levels)))
 
-    def apply_action_rate(
+    @property
+    def delta_step(self) -> float:
+        """One period's maximum lever move, in box units.
+
+        The two factors: the normalised box is two units wide, and
+        :attr:`EnvConfig.delta_rate` is per year while a step is ``dt`` of one.
+        """
+        return 2.0 * self.config.delta_rate * self._world.dt
+
+    def resolve_action(
         self, action: np.ndarray, prev_exog: np.ndarray
-    ) -> np.ndarray:
-        """The normalised action after the instrument's slew limit.
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """What the instrument does with a policy output: ``(position, stored)``.
+
+        The request is a fractional step (see :attr:`EnvConfig.delta_rate`):
+        ``position`` -- the previous position moved by ``request * delta_step``
+        and clipped into the box -- is the normalised place the levers end the
+        period at, which is what :meth:`to_actions` maps onto economic units.
+        ``stored`` is the action *in the policy's own space* that produced it,
+        which is what a replay buffer must record: the *effective* step
+        ``(position - previous) / delta_step``. At the box's edge the instrument
+        moved less than asked, and pairing the reward with the request would
+        teach the critic a move that never happened.
 
         ``prev_exog`` is the exogenous level row the move is measured from -- the
         trailing one of an episode, or a branch point's, so a caller simulating
-        this environment's dynamics with another model limits by the *same* rule
-        against the *same* reference rather than a re-stated copy of it.
-
-        The two factors: the normalised box is two units wide, and the configured
-        rate is per year while a step is ``dt`` of one.
-
-        A no-op when :attr:`EnvConfig.action_rate` is ``None``, beyond the clip
-        into the box that :meth:`to_actions` would apply anyway.
+        this environment's dynamics with another model integrates by the *same*
+        rule against the *same* reference rather than a re-stated copy of it.
         """
         raw = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
-        if self.config.action_rate is None:
-            return raw
         previous = self.to_normalised(self._actions_of(prev_exog).to_dict())
-        step = 2.0 * self.config.action_rate * self._world.dt
-        return np.clip(raw, previous - step, previous + step)
+        position = np.clip(previous + raw * self.delta_step, -1.0, 1.0)
+        return position, (position - previous) / self.delta_step
+
+    def toward(self, levels: Mapping[str, float]) -> np.ndarray:
+        """The step that steers the levers toward the given action *levels*.
+
+        How a policy stated in economic units -- a constant baseline, a Taylor
+        rule -- drives the delta instrument: the largest step toward its target
+        the instrument allows, i.e. the clipped ``(target - previous) /
+        delta_step``. A rule whose target sits within one period's move of where
+        the levers stand is exactly itself; one asking for more travels there at
+        instrument speed, which is the same treatment the agent gets rather than
+        an exemption from it.
+
+        Reads the episode's own trailing exogenous row, so it must be called
+        between :meth:`reset` and the episode's end -- which is where a policy
+        lives.
+        """
+        if self._exog is None:
+            raise RuntimeError("environment has no episode; call reset() first")
+        previous = self.to_normalised(self._actions_of(self._exog[-1]).to_dict())
+        target = self.to_normalised(levels)
+        return np.clip((target - previous) / self.delta_step, -1.0, 1.0)
 
     def to_normalised(self, levels: Mapping[str, float]) -> np.ndarray:
         """Map economic action levels back onto the normalised ``[-1, 1]`` vector.
@@ -382,12 +428,12 @@ class CentralBankEnv:
         parameters = self.interface.parameters.from_dict(
             dict(zip(self._param_names, params))
         )
-        # The slew limit is measured from the levers as they actually stand, which
+        # The instrument integrates from the levers as they actually stand, which
         # the trailing exogenous row already records -- so every draw from this
-        # position limits against the same reference, and nothing has to be
+        # position moves against the same reference, and nothing has to be
         # carried across a branch.
-        applied = self.apply_action_rate(action, prev_exog)
-        actions = self.to_actions(applied)
+        position, applied = self.resolve_action(action, prev_exog)
+        actions = self.to_actions(position)
         hidden = self._hidden_row(self._t)
 
         try:
@@ -435,8 +481,9 @@ class CentralBankEnv:
                 # this step with its own model has to be driven by.
                 "parameters": parameters,
                 "actions": actions,
-                # The normalised action *as applied*, slew limit included, which
-                # is not necessarily the one the caller asked for. A replay
+                # The action *as applied*, in the policy's own space -- box edge
+                # included, which is not necessarily the one the caller asked
+                # for (see :meth:`resolve_action`). A replay
                 # buffer has to store this one: the reward and the next state are
                 # what this action produced, and pairing them with a request the
                 # environment declined teaches the critic a transition that never

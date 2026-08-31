@@ -71,23 +71,13 @@ PROXIES = ("varx", "drf", "mdn", "knn", "random-walk")
 #: the random walk uses), and as the *observation's* it is the memoryless agent.
 ENCODERS = ("none", "kalman", "lstm")
 
-#: A policy maps one observation to a normalised action in ``[-1, 1]``. Most are
-#: stateless functions of the observation; one that carries within-episode memory
-#: (the Taylor rule's smoothed growth gap) additionally offers a ``reset()``,
-#: which :func:`reset_policy` calls at every episode boundary.
+#: A policy maps one observation to a normalised action in ``[-1, 1]``: a
+#: fraction of the period's maximum lever move (see
+#: :attr:`~control.env.EnvConfig.delta_rate`). Most are stateless functions of
+#: the observation; one that carries within-episode memory (the Taylor rule's
+#: smoothed growth gap) additionally offers a ``reset()``, which
+#: :func:`reset_policy` calls at every episode boundary.
 Policy = Callable[[np.ndarray], np.ndarray]
-
-
-class _Keep:
-    """Sentinel for "inherit this from the run's config".
-
-    Needed wherever the inherited setting may legitimately *be* ``None``, which
-    would otherwise be indistinguishable from "not specified".
-    """
-
-
-#: The single instance callers pass around.
-_KEEP = _Keep()
 
 
 @dataclass(frozen=True)
@@ -163,16 +153,13 @@ class TrainConfig:
     # -- mandate --
     pi_target: float = 0.02  #: annual inflation target
     collapse_penalty: float = -25.0  #: reward per remaining step of a collapsed episode
-    #: how fast a lever may move, as a fraction of its box **per year**; ``None``
-    #: lets the agent swing it end to end between periods. Annualized so that one
-    #: number means one thing at every :attr:`dt` -- see
-    #: :attr:`~control.env.EnvConfig.action_rate`. Set here so that the
-    #: limit is part of the **environment** the agent is trained and evaluated in
-    #: rather than a filter applied to its output at deployment time -- a policy
-    #: optimised without it and then run under it is not the policy that was
-    #: optimised, and the acceptance test of :mod:`control.live` would be scoring
-    #: a controller that never acts. See :attr:`~control.env.EnvConfig.action_rate`.
-    action_rate: float | None = None
+    #: the instrument's speed: the maximum the policy's full deflection moves a
+    #: lever, as a fraction of its box **per year** (annualized so one number
+    #: means one thing at every :attr:`dt`). Part of the **environment** the
+    #: agent is trained and evaluated in, and the same instrument the references
+    #: steer and a live deployment operates -- see
+    #: :attr:`~control.env.EnvConfig.delta_rate`.
+    delta_rate: float = 0.4
 
     # -- agent --
     total_steps: int = 100_000  #: environment steps (== proxy steps)
@@ -378,15 +365,8 @@ def _env(
     split: str,
     seed: int,
     horizon: int | None = None,
-    action_rate: float | None | _Keep = _KEEP,
 ) -> CentralBankEnv:
-    """An environment over ``driver``, drawing from the train or eval futures.
-
-    ``action_rate`` defaults to the sentinel ``_KEEP``, meaning "whatever the run
-    was configured with". ``None`` is not available as that default because
-    ``None`` is a meaningful *value* -- no slew limit at all -- and a caller
-    switching the limit off for an ablation has to be able to say so.
-    """
+    """An environment over ``driver``, drawing from the train or eval futures."""
     episodes = world.train_futures if split == "train" else world.eval_futures
     return CentralBankEnv(
         driver,
@@ -397,9 +377,7 @@ def _env(
         EnvConfig(
             collapse_penalty=config.collapse_penalty,
             horizon=horizon or config.horizon,
-            action_rate=(
-                config.action_rate if isinstance(action_rate, _Keep) else action_rate
-            ),
+            delta_rate=config.delta_rate,
         ),
         seed=seed,
     )
@@ -429,7 +407,6 @@ def build_truth_env(
     split: str = "eval",
     seed: int = 0,
     horizon: int | None = None,
-    action_rate: float | None | _Keep = _KEEP,
 ) -> CentralBankEnv:
     """The same environment over the **structural** model instead of a proxy.
 
@@ -446,12 +423,10 @@ def build_truth_env(
 
     ``horizon`` overrides how many steps of a drawn future an episode runs for,
     which a deployment needs: it takes one future for hundreds of periods where
-    training cut the bank into episodes of fifty. ``action_rate`` likewise
-    overrides the instrument's slew limit, which is how the deployment ablates it
-    without rebuilding the run it inherited.
+    training cut the bank into episodes of fifty.
     """
     return _env(GroundTruthDriver(world), world, observer, reward, config,
-                split=split, seed=seed, horizon=horizon, action_rate=action_rate)
+                split=split, seed=seed, horizon=horizon)
 
 
 # -- policies ---------------------------------------------------------------
@@ -471,15 +446,40 @@ def reset_policy(policy: Policy) -> None:
         reset()
 
 
+def free_instrument(config: TrainConfig) -> TrainConfig:
+    """The run's configuration with an instrument too fast to constrain.
+
+    One period's maximum move spans the whole box (``delta_rate = 1/dt``, so the
+    step is exactly two normalised units), which makes
+    :meth:`~control.env.CentralBankEnv.toward` reach any target *within* the
+    period: a rule stated in levels behaves as its textbook self. The references
+    are evaluated under this deliberately: the instrument's speed is part of the
+    **agent's** policy problem, and a reference slowed to the agent's instrument
+    would be a different rule than the one in the book -- note that this makes
+    Taylor a *weaker* bar at sub-quarterly ``dt``, where a slower instrument
+    damps the high-gain oscillation :func:`taylor_policy` documents. The agent's
+    own environments keep the configured speed.
+    """
+    return replace(config, delta_rate=1.0 / config.dt)
+
+
 def random_policy(action_dim: int, rng: np.random.Generator) -> Policy:
-    """A policy that samples uniformly from the action box."""
+    """A policy that samples steps uniformly: a random walk over the box."""
     return lambda obs: rng.uniform(-1.0, 1.0, size=action_dim)
 
 
 def constant_policy(env: CentralBankEnv, levels: Mapping[str, float]) -> Policy:
-    """A policy that always applies the given action *levels* (not normalised)."""
-    action = env.to_normalised(levels)
-    return lambda obs: action
+    """A policy that holds the levers at the given action *levels* (not normalised).
+
+    "Holds" means steers, under the delta instrument
+    (:meth:`~control.env.CentralBankEnv.toward`): the economy hands over
+    wherever the history left the levers, so the baseline first travels to its
+    own setting at the speed of the environment it is bound to and sits still
+    thereafter. Bound to a :func:`free_instrument` environment -- which is how
+    the references are scored -- it arrives within the first period.
+    """
+    levels = dict(levels)
+    return lambda obs: env.toward(levels)
 
 
 def taylor_policy(
@@ -530,13 +530,18 @@ def taylor_policy(
     rule opens at the calibration rate and earns its deviations from data.
 
     The rule reads the standardised observation and inverts it, so it consumes
-    exactly what the agent does and can be scored on the same futures. Rates
-    outside :attr:`~control.env.EnvConfig.action_bounds` are clipped by
-    :meth:`~control.env.CentralBankEnv.to_normalised`, and that lower bound
-    **binds often**: the book's calibration settles with inflation around 1%, so a
-    rule aiming at 2% cuts into the floor and spends much of an episode there. The
-    rule is therefore a reference, not a well-tuned policy -- which is the point of
-    scoring it next to the constant baseline rather than instead of it.
+    exactly what the agent does and can be scored on the same futures. It drives
+    a delta instrument (:meth:`~control.env.CentralBankEnv.toward`): the rate it
+    computes is a *target*, travelled toward at the speed of the environment it
+    is bound to -- conventionally a :func:`free_instrument` one, under which the
+    move completes within the period and the rule is its textbook self, exempt
+    by design from the speed that constrains the agent. Targets outside
+    :attr:`~control.env.EnvConfig.action_bounds` clip to the box, and that lower
+    bound **binds often**: the book's calibration settles with inflation around
+    1%, so a rule aiming at 2% cuts into the floor and spends much of an episode
+    there. The rule is therefore a reference, not a well-tuned policy -- which is
+    the point of scoring it next to the constant baseline rather than instead of
+    it.
     """
     return _TaylorRule(
         env,
@@ -599,7 +604,7 @@ class _TaylorRule:
             + (1.0 + self._phi_pi) * (raw[self._pi_at] - self._pi_target)
             + self._phi_y * self._gap
         )
-        return self._env.to_normalised({**self._levels, "Rbbar": rate})
+        return self._env.toward({**self._levels, "Rbbar": rate})
 
 
 def agent_policy(agent: DSACAgent, *, deterministic: bool = True) -> Policy:
@@ -848,10 +853,24 @@ def setup(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
     )
 
 
-def train(config: TrainConfig | None = None, *, verbose: bool = True) -> TrainingResult:
-    """Build the world, fit the proxy and train a DSAC agent inside it."""
+def train(
+    config: TrainConfig | None = None,
+    *,
+    result: TrainingResult | None = None,
+    verbose: bool = True,
+) -> TrainingResult:
+    """Build the world, fit the proxy and train a DSAC agent inside it.
+
+    ``result`` hands in a stack built elsewhere instead of calling :func:`setup`.
+    One kind of caller wants that: an experiment that trains the same agent, in
+    the same world, against a *different world model* -- a proxy read through an
+    online correction, say -- which is a substitution of one object and needs
+    none of the rest rebuilt. Everything else about the run, including which
+    environment the loop steps and which one it evaluates in, comes from the
+    stack it is given.
+    """
     config = config or TrainConfig()
-    result = setup(config, verbose=verbose)
+    result = setup(config, verbose=verbose) if result is None else result
     observer = result.observer
     env, eval_env, agent = result.env, result.eval_env, result.agent
 
@@ -859,14 +878,20 @@ def train(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
     buffer = ReplayBuffer(config.capacity, env.obs_dim, env.action_dim)
 
     explore = random_policy(env.action_dim, rng)
+    # The references act on a free instrument (see :func:`free_instrument`) --
+    # an environment of their own over the same futures under the same seed, so
+    # every comparison stays paired while only the agent is speed-constrained.
+    ref_env = build_env(copy.copy(result.proxy), result.world, observer,
+                        env.reward, free_instrument(config), split="eval",
+                        seed=config.seed + 1)
     references: dict[str, Policy] = {
         "random": explore,
-        "calibration": constant_policy(eval_env, calibration_actions()),
-        "taylor": taylor_policy(eval_env, observer, dt=config.dt,
+        "calibration": constant_policy(ref_env, calibration_actions()),
+        "taylor": taylor_policy(ref_env, observer, dt=config.dt,
                                 pi_target=config.pi_target),
     }
     result.baselines_ = {
-        name: evaluate(eval_env, policy, config.eval_episodes,
+        name: evaluate(ref_env, policy, config.eval_episodes,
                        repeats=config.eval_repeats)
         for name, policy in references.items()
     }
@@ -901,10 +926,11 @@ def train(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
         # the trajectory is unchanged and the buffer gains ``branch_k`` samples of
         # the kernel at this state rather than one.
         draws = env.branch_step(action, config.branch_k)
-        # What the environment *applied*, which is the requested action only when
-        # no slew limit bound (see :attr:`~control.env.EnvConfig.action_rate`).
-        # Every draw from this position applied the same one; storing the request
-        # instead would pair a reward with an action that did not earn it.
+        # What the instrument *applied* -- the effective step, which is the
+        # requested one only short of the box's edge (see
+        # :meth:`~control.env.CentralBankEnv.resolve_action`). Every draw from
+        # this position applied the same one; storing the request instead would
+        # pair a reward with an action that did not earn it.
         applied = draws[-1].info.get("action", action)
         # ``done`` marks a genuine terminal state only: a horizon truncation must
         # still bootstrap, or the agent learns the world ends every episode.
@@ -984,10 +1010,12 @@ def train(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
                 f"final scoring: {config.eval_episodes} futures x "
                 f"{config.final_repeats} rolls..."
             )
+        scored = {"agent": (eval_env, agent_policy(agent))}
+        scored.update({name: (ref_env, policy) for name, policy in references.items()})
         result.final_ = {
-            name: evaluate(eval_env, policy, config.eval_episodes,
+            name: evaluate(scoring_env, policy, config.eval_episodes,
                            repeats=config.final_repeats)
-            for name, policy in {"agent": agent_policy(agent), **references}.items()
+            for name, (scoring_env, policy) in scored.items()
         }
         if verbose:
             for name, scores in result.final_.items():

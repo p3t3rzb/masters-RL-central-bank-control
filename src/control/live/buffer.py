@@ -134,7 +134,12 @@ class RealBuffer:
         )
 
     def branches(
-        self, n: int, rng: np.random.Generator, *, decay: float = 0.99
+        self,
+        n: int,
+        rng: np.random.Generator,
+        *,
+        decay: float = 0.99,
+        half: int | None = None,
     ) -> list[BranchPoint]:
         """Draw ``n`` branch points, weighted toward recently visited states.
 
@@ -144,10 +149,26 @@ class RealBuffer:
         the history is the only broad coverage there is, and a policy improved
         only on the last few quarters is a policy that has forgotten the rest of
         the economy.
+
+        ``half`` restricts the draw to the even (``0``) or odd (``1``) stored
+        positions, which is the one held-out split a live run can afford. There
+        is no second economy to evaluate a candidate in, so a policy improved on
+        rollouts from *these* states and then scored on rollouts from the same
+        states is being tested where it was fitted. Splitting the states by
+        arrival parity gives the two an interleaved and therefore
+        distributionally identical pair of pools -- a contiguous split would hand
+        the test set a different stretch of the run and confound overfitting with
+        drift. ``None`` draws from everything, which is the behaviour when the
+        split is off.
         """
         usable = [i for i, b in enumerate(self._branches[: self._size]) if b is not None]
+        if half is not None:
+            usable = [i for i in usable if i % 2 == half]
         if not usable:
-            raise RuntimeError("the real buffer holds no branchable states")
+            raise RuntimeError(
+                "the real buffer holds no branchable states"
+                + ("" if half is None else f" in half {half}")
+            )
         age = np.array([self._size - 1 - i for i in usable], dtype=float)
         w = decay**age * self._weight[usable]
         idx = rng.choice(len(usable), size=n, p=w / w.sum())
@@ -214,6 +235,15 @@ def seed_from_run(
             "action box; they would be stored with an action that did not produce "
             "their reward. Widen EnvConfig.action_bounds or drop the rows."
         )
+    # What the buffer records is the action in the *policy's* space: the step
+    # the position took, in units of the period's maximum move
+    # (:attr:`~control.env.EnvConfig.delta_rate`). A historic step faster than
+    # that maximum stores beyond [-1, 1], and faithfully so: the linear relation
+    # between step and position holds off the box too, so the pairing of action
+    # and reward stays exact, and these rows are only ever *read* by the critic,
+    # never emitted by the actor. Row ``j - 1`` belongs to the transition into
+    # period ``j``.
+    stored = np.diff(normalised, axis=0) / env.delta_step
 
     start = max(observer.required_window, shadow.required_window) - 1
     if len(run) < start + 2:
@@ -260,7 +290,7 @@ def seed_from_run(
         )
         buffer.add(
             obs,
-            normalised[j],
+            stored[j - 1],
             r,
             next_obs,
             False,  # the history is required not to have collapsed
