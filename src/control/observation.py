@@ -43,14 +43,16 @@ trajectory for the whole of training. Standardisation follows the same rule:
 truth-side observations must be the same function of the same state, or a policy
 cannot be transferred between them.
 
-**Every episode starts from the same belief, and it is the whole history's.**
+**An episode starts from the belief its start row is filtered up to.**
 Filtering only a short tail at each reset would start the memory at the encoder's
 *prior* -- for the Kalman encoder, its estimate of the latent at the beginning of
 the history -- and leave the policy several steps of an episode reading a regime
-signal that has not caught up yet. Since every episode branches from the end of
-the run the observer was fit on, that belief is a constant: :meth:`Observer.fit`
-filters the whole history once and keeps the posterior as
-:attr:`Observer.branch_belief_`, and a reset simply reads it. Correct by
+signal that has not caught up yet. But an episode branches off a *row of the run
+the observer was fit on*, so the right belief is a constant of that row and there
+is nothing to recompute at reset: :meth:`Observer.fit` filters the history once
+per start row and keeps the posteriors in :attr:`Observer.branch_beliefs_`
+(:meth:`Observer.belief_at`), of which :attr:`Observer.branch_belief_` -- the
+history's end, where an evaluation and a deployment start -- is one. Correct by
 construction and free per episode, rather than approximated from a window.
 
 The default encoder is the :class:`~economic_models.encoders.base.NullEncoder`,
@@ -61,7 +63,7 @@ than a separate code path.
 
 from __future__ import annotations
 
-from typing import Any, Self
+from typing import Any, Self, Sequence
 
 import numpy as np
 
@@ -108,12 +110,13 @@ class Observer:
         self.clip = clip
         self.mean_: np.ndarray | None = None  # (dim,) fit on the history
         self.std_: np.ndarray | None = None  # (dim,)
-        #: the belief every episode starts from: the whole history filtered up to
-        #: (but not including) its last period, which the episode's first
-        #: :meth:`observe` folds in. Handed out directly rather than copied -- the
+        #: the belief an episode starting at row ``t`` of the history begins
+        #: from: the history filtered up to (but not including) period ``t``,
+        #: which the episode's first :meth:`observe` folds in. Handed out
+        #: directly rather than copied -- the
         #: :meth:`~economic_models.encoders.base.StateEncoder.advance` purity
         #: contract means no caller can disturb it.
-        self.branch_belief_: Any = None
+        self.branch_beliefs_: dict[int, Any] = {}
 
     # -- shape ---------------------------------------------------------------
 
@@ -162,20 +165,24 @@ class Observer:
 
     # -- fitting -------------------------------------------------------------
 
-    def fit(self, history: Run) -> Self:
+    def fit(self, history: Run, *, branches: Sequence[int] = ()) -> Self:
         """Fit the encoder on the historic run and freeze the standardisation.
 
         Both are learned here and neither moves again: the encoder becomes a fixed
         filter and the statistics fixed constants, so the observation is one
         unchanging function of the trajectory for the whole of training.
 
-        The episode-start belief (:attr:`branch_belief_`) is filtered here too,
-        off the same pass: every episode branches from this run's end, so the
-        belief it starts from is a constant and there is nothing to recompute at
-        reset. It stops one period short of that end for the reason
+        The episode-start beliefs (:attr:`branch_beliefs_`) are filtered here too,
+        off the same pass: an episode branches from a *row of this run*, so the
+        belief it starts from is a constant of that row and there is nothing to
+        recompute at reset. Each stops one period short of its row for the reason
         :meth:`init_belief` does -- the episode's first :meth:`observe` folds the
-        branch period in -- which lands it exactly on the last row
-        :meth:`run_features` produces.
+        branch period in.
+
+        ``branches`` are the history rows episodes may start from; the last row is
+        always included, since it is where an evaluation and a deployment start.
+        Filtering ``k`` prefixes costs ``k`` passes of a recursion that runs once
+        per period, which is nothing against the training it warm-starts.
         """
         F, U = self._transform.transform_run(history)
         self._encoder.fit([(F, U)])
@@ -184,8 +191,36 @@ class Observer:
         self.mean_ = features.mean(axis=0)
         # A constant column (std 0) standardises to 0 rather than exploding.
         self.std_ = np.where(std > 1e-12, std, 1.0)
-        self.branch_belief_ = self._encoder.init_belief(F[:-1], U[:-1])
+        # A feature row costs two level rows, so history row ``t`` is feature row
+        # ``t - 1``; the belief for a start at ``t`` is the filter run over every
+        # feature row strictly before it.
+        self.branch_beliefs_ = {
+            int(t): self._encoder.init_belief(F[: t - 1], U[: t - 1])
+            for t in sorted({*branches, len(history) - 1})
+        }
         return self
+
+    @property
+    def branch_belief_(self) -> Any:
+        """The belief at the history's end, where evaluation and deployment start."""
+        if not self.branch_beliefs_:
+            raise RuntimeError("observer must be fit before it has a branch belief")
+        return self.branch_beliefs_[max(self.branch_beliefs_)]
+
+    def belief_at(self, row: int) -> Any:
+        """The belief an episode starting at history ``row`` begins from.
+
+        Only the rows :meth:`fit` was told about are available: a belief is a
+        filter run over a prefix, and inventing one here for a row nobody declared
+        would silently hand an episode the encoder's prior.
+        """
+        try:
+            return self.branch_beliefs_[int(row)]
+        except KeyError:
+            raise KeyError(
+                f"the observer was not fit with row {row} as a start; it has "
+                f"{sorted(self.branch_beliefs_)}"
+            ) from None
 
     def run_features(self, run: Run) -> np.ndarray:
         """Raw (unstandardised) observation rows for a whole run.
@@ -209,10 +244,10 @@ class Observer:
         one period each and the branch period is counted exactly once.
 
         The general form, for a start the observer was not fit up to; an episode
-        branching from the history's end reads :attr:`branch_belief_`, which is
-        this run over the whole history. A filter given a short window starts at
-        its prior, so the shorter the window the longer the belief takes to mean
-        anything.
+        branching from a row of the history it *was* fit on reads
+        :meth:`belief_at`, which is this run over the whole prefix. A filter given
+        a short window starts at its prior, so the shorter the window the longer
+        the belief takes to mean anything.
         """
         states, params, actions = window
         if len(states) < self.required_window:

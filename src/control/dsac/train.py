@@ -129,10 +129,32 @@ class TrainConfig:
     #: difficulty, rather than another draw of the one the stack was built in.
     #: See :attr:`~control.world.WorldConfig.deploy_jitter`.
     deploy_jitter: float = 0.0
+    #: how many rows of the history training episodes start from
+    #: (:attr:`~control.world.WorldConfig.n_starts`). One is the original
+    #: behaviour: every episode branches off the history's end, which is one draw
+    #: from the economy's state distribution and reliably an extreme of
+    #: something. Above one the *training* bank is spread over that many rows and
+    #: the agent is optimised from a distribution of initial conditions instead of
+    #: a point; evaluation and deployment still start at the end, so the score is
+    #: comparable either way.
+    n_starts: int = 1
+    #: rows at the head of the history no start is taken from, so the encoder
+    #: belief an episode begins with has converged
+    #: (:attr:`~control.world.WorldConfig.start_burn_in`).
+    start_burn_in: int = 100
     world_seed: int = 0  #: seeds the history and its futures
 
     # -- world model --
     proxy: str = "varx"  #: which proxy family is the environment
+    #: widen the world model's sampled law where it is extrapolating
+    #: (:attr:`~economic_models.proxy.models.varx.VARXProxy.epistemic`). The
+    #: residual covariance a stochastic rollout draws from is one constant matrix,
+    #: so it is as tight off-support as on it and an agent optimising against it
+    #: is told nothing about having left the data. This scales each draw by the
+    #: ridge's own predictive standard deviation, which grows with the query's
+    #: leverage -- the cheapest honest signal available, and the one a risk-averse
+    #: objective (``risk="cvar"``) turns into pessimism about the unknown.
+    epistemic: bool = False
     #: the encoder whose filtered latent the proxy forecasts from (one of
     #: :data:`ENCODERS`). ``"kalman"`` is the linear-Gaussian filter, ``"lstm"``
     #: its nonlinear sibling; ``"none"`` leaves the proxy conditioned on the
@@ -232,6 +254,8 @@ class TrainConfig:
             n_deploy_futures=self.n_deploy_futures,
             deploy_excitation=self.deploy_excitation,
             deploy_jitter=self.deploy_jitter,
+            n_starts=self.n_starts,
+            start_burn_in=self.start_burn_in,
             seed=self.world_seed,
         )
 
@@ -305,6 +329,7 @@ def build_proxy(
     encoder: str | StateEncoder = "kalman",
     latent: int = 10,
     seed: int = 0,
+    epistemic: bool = False,
 ) -> BaseProxyModel:
     """An unfitted proxy of family ``name`` over the GROWTH interface.
 
@@ -322,6 +347,12 @@ def build_proxy(
 
     The random walk takes no encoder (it is the encoder-free baseline) and ignores
     both arguments.
+
+    ``epistemic`` widens the sampled law by the fitted map's own parameter
+    uncertainty where a query leaves the design
+    (:attr:`~economic_models.proxy.models.varx.VARXProxy.epistemic`). Only the
+    linear family has it in closed form, so it is ignored by the others rather
+    than silently approximated.
     """
     if name not in PROXIES:
         raise ValueError(f"proxy must be one of {PROXIES}, got {name!r}")
@@ -332,7 +363,7 @@ def build_proxy(
         return build_encoder(encoder, latent=latent, seed=seed, role="encoder")
 
     if name == "varx":
-        return VARXProxy(GROWTH_INTERFACE, encoder=new())
+        return VARXProxy(GROWTH_INTERFACE, encoder=new(), epistemic=epistemic)
     if name == "drf":
         return DRFProxy(GROWTH_INTERFACE, encoder=new(), seed=seed)
     if name == "mdn":
@@ -721,9 +752,8 @@ def rollout(
     bank, so ``first=eval_episodes`` is the first future the run has never scored.
 
     Real growth and potential growth both need the period *before* the first one,
-    which is the history's last row for every episode -- every future branches from
-    the same state, so the two series line up from step zero rather than starting
-    one period in.
+    which is the history row the episode branches from -- so the two series line up
+    from step zero rather than starting one period in.
 
     A collapsed episode has no plausible state to record, so its row is ``NaN``
     from the collapse onwards and a column-wise average is over the survivors.
@@ -752,8 +782,9 @@ def rollout(
     for i, episode in enumerate(episodes):
         obs, _ = env.reset(seed=seed + first + i, episode=episode)
         reset_policy(policy)
-        prev_yk = float(world.history.states[-1][yk])
-        prev_nfe = float(world.history.params[-1][nfe])
+        row = episode.branch.row
+        prev_yk = float(world.history.states[row][yk])
+        prev_nfe = float(world.history.params[row][nfe])
         for t in range(min(len(episode), cap)):
             obs, _, terminated, truncated, info = env.step(policy(obs))
             if terminated:
@@ -810,7 +841,11 @@ def setup(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
             f"latent {config.latent}) on {len(world.history)} steps..."
         )
     proxy = build_proxy(
-        config.proxy, encoder=config.encoder, latent=config.latent, seed=config.seed
+        config.proxy,
+        encoder=config.encoder,
+        latent=config.latent,
+        seed=config.seed,
+        epistemic=config.epistemic,
     )
     proxy.fit([world.history])
     observer = Observer(
@@ -818,7 +853,7 @@ def setup(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
         encoder=build_obs_encoder(
             config.obs_encoder, latent=config.obs_latent, seed=config.seed
         ),
-    ).fit(world.history)
+    ).fit(world.history, branches=world.start_rows)
     reward = MandateReward(config.pi_target)
     if verbose:
         print(

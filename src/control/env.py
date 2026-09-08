@@ -1,7 +1,7 @@
 """The central-bank environment: one episode is one exogenous future.
 
-An episode starts at the end of the history, runs for the horizon of one drawn
-future, and asks the agent for ``(Rbbar, NCAR, ro)`` every period. The
+An episode starts where its future was forked from the history, runs for that
+future's horizon, and asks the agent for ``(Rbbar, NCAR, ro)`` every period. The
 environment owns four things the model itself does not: the action box, the
 observation, the reward, and what counts as a collapse.
 
@@ -332,27 +332,35 @@ class CentralBankEnv:
 
     def reset(self, *, seed: int | None = None, episode: Episode | None = None
               ) -> tuple[np.ndarray, dict[str, Any]]:
-        """Start a new episode at the branch point under a drawn future.
+        """Start a new episode at its future's branch point.
 
         ``episode`` forces a particular future (deterministic evaluation);
         otherwise one is drawn from the bank. ``seed`` re-seeds the environment's
         generator, which drives both the draw and the proxy's transition noise.
+
+        Where the episode starts is the episode's own property
+        (:attr:`~control.world.Episode.branch`) rather than the environment's: an
+        evaluation or deployment bank forks off the history's end, and a training
+        bank may be spread over several of its rows
+        (:attr:`~control.world.WorldConfig.n_starts`). The environment reads it
+        and hands it to the driver and the observer, which is all it takes for the
+        two to arrive at the same place.
         """
         if seed is not None:
             self._rng = np.random.default_rng(seed)
         self._episode = episode if episode is not None else self.episodes.draw(self._rng)
         self._t = 0
 
-        states, exog = self.driver.reset()
+        branch = self._episode.branch
+        states, exog = self.driver.reset(branch)
         self._states, self._exog = states, exog
-        # Every episode branches from the same point, so the memory it starts
-        # from is the same object every time: the whole history filtered once at
-        # fit time. It stops one period short of the branch, which this first
-        # observation then folds in -- so reset and step each advance the belief
-        # by exactly one period.
-        self._belief = self.observer.branch_belief_
+        # The memory an episode starts from is a constant of its branch row: the
+        # history filtered up to it, once at fit time. It stops one period short
+        # of the branch, which this first observation then folds in -- so reset
+        # and step each advance the belief by exactly one period.
+        self._belief = self.observer.belief_at(branch.row)
         self._obs, self._belief = self.observer.observe(states, exog, self._belief)
-        return self._obs, {"episode": self._episode.index}
+        return self._obs, {"episode": self._episode.index, "branch": branch.row}
 
     def step(
         self, action: np.ndarray

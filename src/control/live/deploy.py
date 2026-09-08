@@ -61,11 +61,10 @@ one-shot deployments, which is the right object to set hyperparameters against.
 from __future__ import annotations
 
 import copy
-import multiprocessing
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
 
 import numpy as np
 import torch
@@ -73,6 +72,7 @@ import torch
 from economic_models.proxy import BaseProxyModel
 from economic_models.run import Run
 from economic_models.variables import Actions, Parameters, State
+from parallel import managed_pool
 
 from control.dsac.agent import DSACAgent
 from control.dsac.replay import Batch, ReplayBuffer
@@ -100,6 +100,7 @@ from control.live.forcing import (
 from control.live.monitor import OODMonitor
 from control.live.residual import (
     BlockBootstrapResidualNoise,
+    action_columns,
     NullResidual,
     Residual,
     ResidualModel,
@@ -189,6 +190,26 @@ class LiveConfig:
     kappa: float = 0.2  #: bias-state EWMA rate (~1 year at dt=0.25)
     bootstrap_noise: bool = False  #: block-bootstrap the spread instead of Gaussian
     correct: bool = True  #: at False the model is the raw proxy (the ablation)
+    #: let the correction read the **action block** of its design.
+    #:
+    #: Off is the better default and the reason is identification, not taste. A
+    #: live run moves its levers by policy, so the action columns are a near
+    #: exact function of the rest of the design -- measured over a deployment,
+    #: a variance inflation of order a thousand against the twenty-odd the
+    #: excited history carries. Their coefficients are then settled by the prior
+    #: rather than by the data, and the direction they are wrong in is the one
+    #: direction a policy is made of: the model's response to the instrument.
+    #: What that buys in forecast is negligible (deleting the block moves the
+    #: one-step error from 0.161 to 0.184 of the raw proxy's, under a thirtieth
+    #: of the correction's total gain) and what it costs is the whole of the
+    #: control signal -- the corrected response to a lever has been measured
+    #: *orthogonal* to the structural economy's while the raw proxy's still
+    #: carries a positive alignment with it.
+    #:
+    #: On restores the earlier behaviour, and is worth keeping for the ablation:
+    #: "the correction may not touch the levers" is a claim, and a run with it
+    #: switched on is what the claim is measured against.
+    correct_actions: bool = False
 
     # -- the exogenous forecast --
     forcing: str = "var"  #: one of :data:`FORCINGS`
@@ -425,9 +446,17 @@ def residual_seed(
 
 
 def build_residual(
-    seed_rows: tuple[np.ndarray, np.ndarray], live: LiveConfig, n_outputs: int
+    seed_rows: tuple[np.ndarray, np.ndarray],
+    live: LiveConfig,
+    n_outputs: int,
+    *,
+    ignore: Sequence[int] | None = None,
 ) -> Residual:
-    """A correction primed on the historic rows, or the null one."""
+    """A correction primed on the historic rows, or the null one.
+
+    ``ignore`` are design columns the correction may not read; a caller passes
+    the action block here when :attr:`LiveConfig.correct_actions` is off.
+    """
     if not live.correct:
         return NullResidual(n_outputs)
     noise = (
@@ -441,6 +470,7 @@ def build_residual(
         forgetting=live.forgetting,
         kappa=live.kappa,
         noise=noise,
+        ignore=ignore,
     )
     X, E = seed_rows
     return model.seed(X, E, weight=live.history_weight)
@@ -650,10 +680,18 @@ def deploy(
     # rollout state, so filtering the live run and imagining a future off it
     # cannot disturb each other.
     shadow: BaseProxyModel = copy.copy(result.proxy)
+    rows = (
+        seed_rows if seed_rows is not None
+        else residual_seed(result, live, verbose=verbose)
+    )
     residual = build_residual(
-        seed_rows if seed_rows is not None else residual_seed(result, live, verbose=verbose),
+        rows,
         live,
         n_feat,
+        ignore=(
+            None if live.correct_actions
+            else action_columns(result.proxy, rows[0].shape[1])
+        ),
     )
     model = CorrectedProxy(copy.copy(result.proxy), residual)
 
@@ -854,6 +892,35 @@ def deploy(
     return record
 
 
+#: The feedback gains each named Taylor reference is run at.
+#:
+#: The rule is one bar with two settings worth drawing, and which of them is
+#: *the* bar is exactly the question :mod:`control.tuning` was written to answer.
+#: ``"taylor"`` is Taylor's original pair, taken on faith everywhere in this
+#: repository before that package existed; ``"taylor-tuned"`` is the pair
+#: ``scripts/tune_policy.py`` selected over the ``data/`` ensemble, chosen on
+#: held-out economies and confirmed on a test split it had never seen
+#: (``scripts/tune_taylor_signed.json``).
+#:
+#: The tuned ``phi_pi`` is **negative**, and deliberately so. The rule's response
+#: to inflation is ``1 + phi_pi``, so the searchable range has to span zero for
+#: the rule to reach its own baseline: ``phi_pi = -1`` with ``phi_y = 0`` leaves
+#: ``rate = i*`` at every period, which *is* the calibration constant. It matters
+#: here because GROWTH settles near 0.6% inflation against a 2% target, so a
+#: one-for-one response costs a permanent ~1.4-point rate offset that no choice
+#: of ``phi_y`` can undo. Read the tuned pair as the rule buying back that level,
+#: not as evidence against inflation feedback -- at ``1 + phi_pi = 0.094`` it
+#: violates the Taylor principle, and beats the constant baseline by only 1.4%.
+#:
+#: Both are kept, and a figure should show both: an agent that beats the untuned
+#: rule and loses to the tuned one has not beaten the Taylor rule, and the only
+#: way to see that is to draw the two separately.
+TAYLOR_GAINS: Mapping[str, tuple[float, float]] = {
+    "taylor": (0.5, 0.5),
+    "taylor-tuned": (-0.9065, 0.3161),
+}
+
+
 def run_reference(
     result: TrainingResult,
     episode: Episode,
@@ -882,16 +949,19 @@ def run_reference(
         result.world, result.observer, result.env.reward,
         free_instrument(result.config), seed=seed, horizon=live.live_steps,
     )
-    policies = {
-        "taylor": lambda: taylor_policy(
+    if policy_name in TAYLOR_GAINS:
+        phi_pi, phi_y = TAYLOR_GAINS[policy_name]
+        policy = taylor_policy(
             env, result.observer, dt=result.config.dt,
-            pi_target=result.config.pi_target,
-        ),
-        "calibration": lambda: constant_policy(env, calibration_actions()),
-    }
-    if policy_name not in policies:
-        raise ValueError(f"unknown reference policy {policy_name!r}")
-    policy = policies[policy_name]()
+            pi_target=result.config.pi_target, phi_pi=phi_pi, phi_y=phi_y,
+        )
+    elif policy_name == "calibration":
+        policy = constant_policy(env, calibration_actions())
+    else:
+        raise ValueError(
+            f"unknown reference policy {policy_name!r}; expected one of "
+            f"{(*TAYLOR_GAINS, 'calibration')}"
+        )
 
     record = RunRecord(name=policy_name, episode=episode.index)
     obs, _ = env.reset(seed=seed, episode=episode)
@@ -1106,11 +1176,8 @@ def rehearse(
         # keeps to one process -- a pool of pools oversubscribes the machine.
         oracle_one = None if oracle is None else replace(oracle, workers=1)
         rehearsed = [None] * len(bank)
-        with ProcessPoolExecutor(
+        with managed_pool(
             pool_size,
-            # Spawn rather than fork, explicitly: the parent holds torch and a
-            # solver mid-state, neither of which survives forking safely.
-            mp_context=multiprocessing.get_context("spawn"),
             initializer=_worker_init,
             initargs=(result, live, seeds, references, oracle_one),
         ) as pool:

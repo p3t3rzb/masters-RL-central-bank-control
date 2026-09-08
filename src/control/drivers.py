@@ -5,14 +5,22 @@ against the structural :class:`~economic_models.ground_truth.models.growth.model
 without changing a line, because the whole point of the experiment is the gap
 between those two returns. Both families already share
 :meth:`~economic_models.BaseEconomicModel.advance`, but they start an episode
-differently: a proxy warm-starts its encoder belief from a window of trailing
-level rows, while the ground truth is a solver that has to be pinned to the
-branch state the history ended in.
+differently: a proxy warm-starts its encoder belief from a window of level rows
+running up to the start, while the ground truth is a solver that has to be
+pinned to the internal state recorded there.
 
 :class:`ModelDriver` owns that difference and nothing else. It is a template: the
-base hands the environment the two trailing level rows every observation needs
-(the same rows for both families, since the branch point *is* the history's end),
-and the subclass supplies only how the model returns there and how it steps.
+base hands the environment the two level rows every observation needs (the same
+rows for both families, since both start from the same
+:class:`~control.world.BranchPoint`), and the subclass supplies only how the
+model returns there and how it steps.
+
+An episode's start is whatever branch point its future was forked from
+(:attr:`~control.world.Episode.branch`) -- the history's end for an evaluation or
+a deployment, one of several rows for a training bank spread over start points
+(:attr:`~control.world.WorldConfig.n_starts`). A driver is therefore asked to
+return to a *given* row rather than to the one place it knows about, and caches
+what returning there cost so that the second episode from a row is free.
 
 **Branching** is an optional third thing a driver may support: saving a rollout
 position and stepping from it more than once. Only a stochastic model has
@@ -31,11 +39,11 @@ from economic_models.ground_truth import GrowthModel
 from economic_models.proxy import BaseProxyModel, RolloutState
 from economic_models.variables import Actions, Parameters, State
 
-from control.world import TrainingWorld
+from control.world import BranchPoint, TrainingWorld
 
 
 class ModelDriver(ABC):
-    """Runs one model through episodes that all start at the history's end."""
+    """Runs one model through episodes starting at a row of the history."""
 
     def __init__(self, world: TrainingWorld) -> None:
         """Bind the driver to the ``world`` whose history it starts from."""
@@ -54,8 +62,10 @@ class ModelDriver(ABC):
         """Trailing level rows this model needs to be returned to the branch."""
 
     @abstractmethod
-    def _reset(self, window: tuple[np.ndarray, np.ndarray, np.ndarray]) -> None:
-        """Return the model to the branch point, given the warm-start window."""
+    def _reset(
+        self, branch: BranchPoint, window: tuple[np.ndarray, np.ndarray, np.ndarray]
+    ) -> None:
+        """Return the model to ``branch``, given the warm-start window ending there."""
 
     @abstractmethod
     def step(
@@ -90,19 +100,24 @@ class ModelDriver(ABC):
 
     # -- public API ----------------------------------------------------------
 
-    def reset(self) -> tuple[np.ndarray, np.ndarray]:
-        """Return to the branch point; give the trailing state and exog levels.
+    def reset(self, branch: BranchPoint | None = None) -> tuple[np.ndarray, np.ndarray]:
+        """Return to ``branch``; give the trailing state and exog levels there.
 
-        The returned blocks are the last two rows of the history's state levels
-        and of its exogenous levels (parameters then actions) -- everything an
-        observation needs before the first step of an episode.
+        The returned blocks are the two history rows ending at the branch -- its
+        own row and the one before -- of state levels and of exogenous levels
+        (parameters then actions), which is everything an observation needs before
+        the first step of an episode. ``branch`` defaults to the history's end,
+        the start every episode had before banks could be spread over several.
 
-        A stateful driver may ask for the whole history rather than its bare
+        A stateful driver may ask for the whole prefix rather than its bare
         minimum (see :attr:`ProxyDriver.required_window`); two rows is the floor,
-        since an observation needs a previous row to difference against.
+        since an observation needs a previous row to difference against, and a
+        driver asking for more than the branch has behind it gets the prefix.
         """
-        window = self._world.window(max(self.required_window, 2))
-        self._reset(window)
+        branch = self._world.branch_point if branch is None else branch
+        end = branch.row + 1
+        window = self._world.window(min(max(self.required_window, 2), end), end=end)
+        self._reset(branch, window)
         states, params, actions = window
         return (
             states[-2:].astype(float),
@@ -122,17 +137,18 @@ class ProxyDriver(ModelDriver):
         """Bind the driver to a **fitted** ``proxy`` and its ``world``."""
         super().__init__(world)
         self.proxy = proxy
-        #: the branch position, filtered once and restored thereafter.
-        self._start: RolloutState | None = None
+        #: one filtered position per branch row, computed once and restored
+        #: thereafter.
+        self._starts: dict[int, RolloutState] = {}
 
     @property
     def required_window(self) -> int:
-        """The whole history, not the proxy's bare minimum.
+        """The whole history behind the branch, not the proxy's bare minimum.
 
         The proxy's belief conditions its every draw, so a reset that starts it at
         the encoder's prior mis-conditions the world model for the several periods
         the filter takes to catch up -- which are the opening periods of *every*
-        episode, since they all branch from the same place.
+        episode branching from that row.
 
         The observation's encoder is warm-started the same way and over the same
         run (:meth:`~control.observation.Observer.fit`), but that is two filters
@@ -159,20 +175,25 @@ class ProxyDriver(ModelDriver):
         """Put the proxy back at ``snapshot``."""
         self.proxy.restore(snapshot)
 
-    def _reset(self, window: tuple[np.ndarray, np.ndarray, np.ndarray]) -> None:
+    def _reset(
+        self, branch: BranchPoint, window: tuple[np.ndarray, np.ndarray, np.ndarray]
+    ) -> None:
         """Warm-start the encoder belief and level history from the window.
 
-        Filtering the whole history costs far more than the episode that follows
-        it, and every episode branches from the same place -- so the window is
-        filtered on the first reset only and the position restored afterwards.
+        Filtering the prefix costs far more than the episode that follows it, and
+        an episode branches from one of a handful of rows -- so a row is filtered
+        on its first reset only and the position restored on every one after.
         That is what :meth:`snapshot` and :meth:`restore` already do between
-        branch draws; a reset is the same move over a longer gap.
+        branch draws; a reset is the same move over a longer gap. The cache is
+        one rollout state per start row, which is what makes spreading a bank
+        over several of them cost nothing per episode.
         """
-        if self._start is None:
+        start = self._starts.get(branch.row)
+        if start is None:
             self.proxy.reset(*window)
-            self._start = self.proxy.snapshot()
+            self._starts[branch.row] = self.proxy.snapshot()
         else:
-            self.proxy.restore(self._start)
+            self.proxy.restore(start)
 
     def step(
         self,
@@ -193,8 +214,8 @@ class GroundTruthDriver(ModelDriver):
     """Drives the structural GROWTH model, pinned to the branch state.
 
     Evaluation only -- it solves the full system every step. Each episode builds a
-    fresh model and restores the internal state the history ended in, so runs are
-    independent and start exactly where the proxy's warm start does.
+    fresh model and restores the internal state recorded at its branch point, so
+    runs are independent and start exactly where the proxy's warm start does.
 
     Not branchable, and nothing is lost by that: the solver is deterministic, so
     two draws of the same period would agree exactly, and its position lives in a
@@ -214,14 +235,16 @@ class GroundTruthDriver(ModelDriver):
         """The solver needs no window -- the branch state pins it."""
         return 1
 
-    def _reset(self, window: tuple[np.ndarray, np.ndarray, np.ndarray]) -> None:
+    def _reset(
+        self, branch: BranchPoint, window: tuple[np.ndarray, np.ndarray, np.ndarray]
+    ) -> None:
         """Build a fresh model and restore the branch state onto it."""
         self.model_ = GrowthModel(
             dt=self._world.dt,
             iterations=self.iterations,
             threshold=self.threshold,
         )
-        self.model_.set_values(dict(self._world.branch))
+        self.model_.set_values(dict(branch.state))
 
     def step(
         self,

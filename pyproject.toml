@@ -8,6 +8,7 @@ dependencies = [
     "jupyter>=1.1.1",
     "matplotlib>=3.10.9",
     "numpy>=2.0",
+    "optuna>=4.0",
     "pysolve>=0.2.0",
     "scikit-learn>=1.9.0",
     "torch>=2.13.0",
@@ -23,4 +24,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/economic_models", "src/data_generation", "src/control"]
+packages = ["src/economic_models", "src/data_generation", "src/control", "src/parallel"]

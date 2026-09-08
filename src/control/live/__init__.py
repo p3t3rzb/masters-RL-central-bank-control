@@ -35,6 +35,7 @@ Run a rehearsal from the command line with
 from control.live.buffer import BranchPoint, RealBuffer, seed_from_run
 from control.live.corrected import CorrectedProxy, CorrectedRolloutState
 from control.live.deploy import (
+    TAYLOR_GAINS,
     FORCINGS,
     LiveConfig,
     RehearsalResult,
@@ -62,12 +63,14 @@ from control.live.residual import (
     Residual,
     ResidualModel,
     ResidualNoise,
+    action_columns,
     cross_fitted_residuals,
     design,
     in_sample_residuals,
 )
 
 __all__ = [
+    "TAYLOR_GAINS",
     "Residual",
     "ResidualModel",
     "NullResidual",
@@ -98,6 +101,7 @@ __all__ = [
     "rehearse",
     "run_reference",
     "residual_seed",
+    "action_columns",
     "build_residual",
     "build_forcing",
     "FORCINGS",

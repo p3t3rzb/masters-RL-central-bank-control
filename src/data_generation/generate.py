@@ -34,14 +34,14 @@ describing the whole dataset. Reload a run with
 from __future__ import annotations
 
 import argparse
-import multiprocessing as mp
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from dataclasses import dataclass, replace
 
 import numpy as np
 
 from economic_models.ground_truth import GrowthExcitationConfig, GrowthRunGenerator
+from parallel import managed_pool
 
 from data_generation import storage
 from data_generation.config import DatasetConfig
@@ -240,16 +240,10 @@ def generate_dataset(config: DatasetConfig, *, verbose: bool = True) -> dict:
             if verbose:
                 _report(results[-1], len(results), len(tasks))
     else:
-        # 'spawn' keeps macOS/Windows behaviour identical to Linux and avoids
-        # inheriting a half-initialised interpreter; workers rebuild their own
-        # generator in _worker_init.
-        ctx = mp.get_context("spawn")
-        with ProcessPoolExecutor(
-            max_workers=workers,
-            mp_context=ctx,
-            initializer=_worker_init,
-            initargs=(config,),
-        ) as pool:
+        # Spawned workers rebuild their own generator in _worker_init; the pool
+        # tears itself down on an interrupt rather than working through the
+        # thousand groups still queued behind it.
+        with managed_pool(workers, initializer=_worker_init, initargs=(config,)) as pool:
             futures = {pool.submit(_worker_generate, task): task for task in tasks}
             for future in as_completed(futures):
                 result = future.result()
@@ -387,9 +381,19 @@ def _parse_args(argv: list[str] | None = None) -> DatasetConfig:
 
 
 def main(argv: list[str] | None = None) -> None:
-    """CLI entry point: parse arguments and generate the dataset."""
+    """CLI entry point: parse arguments and generate the dataset.
+
+    An interrupt is reported and exits 130 rather than unwinding as a traceback:
+    the pool has already been torn down by then (:func:`_worker_pool`), and the
+    groups written so far stay on disk -- only the manifest, which describes the
+    dataset as a whole, is not written.
+    """
     config = _parse_args(argv)
-    generate_dataset(config)
+    try:
+        generate_dataset(config)
+    except KeyboardInterrupt:
+        print("\nInterrupted; workers stopped, no manifest written.")
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":

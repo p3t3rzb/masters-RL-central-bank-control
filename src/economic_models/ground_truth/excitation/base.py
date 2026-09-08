@@ -359,6 +359,30 @@ class ExcitationProcess(ABC):
         return values
 
 
+@dataclass(frozen=True)
+class BranchCapture:
+    """Everything needed to fork a future off one row of a finished run.
+
+    A :class:`~economic_models.run.Scenario` is drawn from the excitation process
+    alone, but *where* the excitation stands is not a property of the row a run
+    records: the drift deviations, the volatility regime, the live crisis state
+    and the ``Nfe`` log random walk all live inside the process. Forking a future
+    off row ``index`` therefore means resuming that process from the copy it was
+    at when the row was drawn -- ``state`` alone is not enough, and splicing a
+    future drawn elsewhere onto this row would step the economy's exogenous
+    inputs discontinuously.
+
+    ``state`` is the full internal model state at the row (what a solver is
+    restored onto), ``process`` the excitation as it stood having drawn it, and
+    ``applied`` the last converged input set the dampening falls back toward.
+    """
+
+    index: int  #: row of the run this forks from
+    state: dict[str, float]  #: full internal model state at that row
+    process: "ExcitationProcess | None"  #: the excitation, as it stood there
+    applied: dict[str, float]  #: last converged inputs at that row
+
+
 class ExcitedRunGenerator(ABC):
     """Configurable, reproducible generator of excited ground-truth histories.
 
@@ -470,7 +494,7 @@ class ExcitedRunGenerator(ABC):
         rng = np.random.default_rng(seed)
         model = self._settled_model()
         process, climate = self._start_process(rng, excite)
-        run, _ = self._drive(
+        run, _, _ = self._drive(
             model, process, self._baseline_inputs(), n_steps, climate, seed
         )
         return run
@@ -515,8 +539,64 @@ class ExcitedRunGenerator(ABC):
         config must record the same hidden inputs, since a :class:`Scenario`'s
         hidden block is laid out by the generator's own column order.
 
-        Returns ``(main_run, scenarios, branch_state)``.
+        Returns ``(main_run, scenarios, branch_state)``. The single-branch case of
+        :meth:`generate_branched`, which forks futures off several rows of the
+        same run.
         """
+        end = main_steps - 1
+        run, scenarios, branches = self.generate_branched(
+            main_steps,
+            continuation_steps,
+            n_continuations,
+            seed=seed,
+            continuation_seeds=continuation_seeds,
+            continuation_configs=continuation_configs,
+            excite=excite,
+        )
+        return run, scenarios, branches[end].state
+
+    def generate_branched(
+        self,
+        main_steps: int,
+        continuation_steps: int,
+        n_continuations: int,
+        *,
+        branch_at: Sequence[int] | None = None,
+        seed: int | None = None,
+        continuation_seeds: list[int | None] | None = None,
+        continuation_configs: Sequence[ExcitationConfig | None] | None = None,
+        excite: bool = True,
+    ) -> tuple[Run, list[Scenario], dict[int, BranchCapture]]:
+        """One main run and ``n_continuations`` futures forking off rows of it.
+
+        The general form of :meth:`generate_with_continuations`: ``branch_at[j]``
+        is the row of the main run continuation ``j`` forks from, defaulting to
+        the last row for every one of them (which *is*
+        :meth:`generate_with_continuations`). Every fork resumes the excitation
+        from a :class:`BranchCapture` taken at its own row, so a future starts
+        where its row's drift, volatility regime and level random walks actually
+        stood -- the reason a future cannot simply be spliced onto a different
+        row than the one it was drawn for.
+
+        Forking off several rows is how an agent is trained from more than one
+        initial condition. The end of a run is one draw from the economy's state
+        distribution and, being one draw, it is typically an extreme of something:
+        training every episode from it conditions the policy on that corner. The
+        model is still solved exactly once -- for the main run -- because a
+        scenario needs no solve, so a bank spread over many rows costs what a bank
+        forked off one costs.
+
+        Returns ``(main_run, scenarios, captures)``, ``captures`` keyed by the row
+        index each was taken at. A run that collapsed before a requested row has
+        no capture there and raises rather than silently forking elsewhere.
+        """
+        if branch_at is None:
+            branch_at = [main_steps - 1] * n_continuations
+        elif len(branch_at) != n_continuations:
+            raise ValueError(
+                "branch_at must have n_continuations entries "
+                f"({len(branch_at)} != {n_continuations})"
+            )
         if continuation_seeds is not None and len(continuation_seeds) != n_continuations:
             raise ValueError(
                 "continuation_seeds must have n_continuations entries "
@@ -535,20 +615,36 @@ class ExcitedRunGenerator(ABC):
                         f"as the generator's: {cfg.hidden_names} != "
                         f"{self.config.hidden_names}"
                     )
+        wanted = sorted(set(branch_at) | {main_steps - 1})
+        if wanted[0] < 0 or wanted[-1] > main_steps - 1:
+            raise ValueError(
+                f"branch_at must index rows of a {main_steps}-step run, got "
+                f"[{wanted[0]}, {wanted[-1]}]"
+            )
+
         rng = np.random.default_rng(seed)
         model = self._settled_model()
         process, climate = self._start_process(rng, excite)
-        main_run, _ = self._drive(
-            model, process, self._baseline_inputs(), main_steps, climate, seed
+        main_run, _, captures = self._drive(
+            model,
+            process,
+            self._baseline_inputs(),
+            main_steps,
+            climate,
+            seed,
+            branch_at=wanted,
         )
+        missing = [t for t in wanted if t not in captures]
+        if missing:
+            raise RuntimeError(
+                f"the run ended after {len(main_run)} steps and never reached rows "
+                f"{missing}, which futures were asked to fork from"
+            )
 
-        # The full internal model state the main run ends in: the shared starting
-        # point every scenario is rolled out from (the agent supplies the actions).
-        branch_state = self._capture_state(model)
         scenarios: list[Scenario] = []
         for j in range(n_continuations):
             cont_seed = None if continuation_seeds is None else continuation_seeds[j]
-            cont_process = self._fork_process(process, cont_seed)
+            cont_process = self._fork_process(captures[branch_at[j]].process, cont_seed)
             cont_config = (
                 None if continuation_configs is None else continuation_configs[j]
             )
@@ -573,7 +669,7 @@ class ExcitedRunGenerator(ABC):
                     cont_process, continuation_steps, cont_climate, cont_seed
                 )
             )
-        return main_run, scenarios, branch_state
+        return main_run, scenarios, captures
 
     # -- internals ---------------------------------------------------------
 
@@ -692,14 +788,24 @@ class ExcitedRunGenerator(ABC):
         n_steps: int,
         climate: float | None,
         seed: int | None,
-    ) -> tuple[Run, dict[str, float]]:
+        branch_at: Sequence[int] = (),
+    ) -> tuple[Run, dict[str, float], dict[int, BranchCapture]]:
         """Step ``model`` forward ``n_steps`` times, recording the visible history.
 
         ``process`` supplies each step's exogenous inputs (or ``None`` for a
         baseline reference path); ``applied`` is the last-converged input set the
-        dampening falls back toward. Returns the recorded :class:`Run` and the
-        final applied inputs (so a continuation can pick up where this left off).
+        dampening falls back toward. Returns the recorded :class:`Run`, the
+        final applied inputs (so a continuation can pick up where this left off)
+        and a :class:`BranchCapture` per row index in ``branch_at``.
+
+        A capture is taken at the *end* of the step that produced that row, so it
+        holds the model exactly as the row leaves it and the process exactly as it
+        stands having drawn that row's inputs -- which is the position a
+        continuation forking there has to start from. A row the run never reached
+        (it collapsed first) simply has no capture.
         """
+        wanted = frozenset(branch_at)
+        captures: dict[int, BranchCapture] = {}
         state_names = self.STATE.names()
         param_names = self.PARAMETERS.names()
         action_names = self.ACTIONS.names()
@@ -734,6 +840,13 @@ class ExcitedRunGenerator(ABC):
             if process is not None:
                 volatility.append(process.vol_multiplier)
                 crisis_intensity.append(process.crisis_intensity)
+            if len(states) - 1 in wanted:
+                captures[len(states) - 1] = BranchCapture(
+                    index=len(states) - 1,
+                    state=self._capture_state(model),
+                    process=None if process is None else copy.deepcopy(process),
+                    applied=dict(applied),
+                )
 
         excited = process is not None
 
@@ -758,7 +871,7 @@ class ExcitedRunGenerator(ABC):
             climate=climate,
             collapsed=collapsed,
         )
-        return run, applied
+        return run, applied, captures
 
     def _settled_model(self) -> PysolveEconomicModel:
         """A model seeded with the calibration and settled onto its path.

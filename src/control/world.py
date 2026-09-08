@@ -1,13 +1,21 @@
-"""The training world: one historic run and the futures branching off its end.
+"""The training world: one historic run and the futures branching off it.
 
 The whole control experiment is set in a single economy. A ground-truth
 :class:`~economic_models.run.Run` is simulated once -- the *history*
--- and is the only data the proxy is ever fit on. From the state that history
-ends in, :meth:`~economic_models.ground_truth.excitation.base.ExcitedRunGenerator.generate_with_continuations`
+-- and is the only data the proxy is ever fit on. From a state that history
+passes through, :meth:`~economic_models.ground_truth.excitation.base.ExcitedRunGenerator.generate_branched`
 forks the excitation process into many independent *futures*: pure exogenous
 forcing paths (:class:`~economic_models.run.Scenario`), drawn without
 solving any model, because the states depend on the actions an agent has not
 chosen yet. Those futures are this package's episodes.
+
+Which state they fork from is a :class:`BranchPoint`, and by default there is one
+-- the history's end. The evaluation and deployment banks always use it, so a
+score means the same thing in every configuration. The *training* bank may be
+spread over several rows instead (:attr:`WorldConfig.n_starts`), each future
+carrying the branch it was drawn for, so an agent is optimised from a
+distribution of initial conditions rather than from whichever corner of the state
+space this history happened to stop in.
 
 Generating a future is cheap; *rolling through* one is not -- every step of it
 costs one proxy step at training time. The bank of futures is therefore sized for
@@ -24,7 +32,7 @@ the agent actually produced.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Mapping
+from typing import Mapping, Sequence
 
 import numpy as np
 
@@ -33,6 +41,7 @@ from economic_models.ground_truth import (
     GrowthExcitationConfig,
     GrowthRunGenerator,
 )
+from economic_models.ground_truth.excitation.base import BranchCapture
 from economic_models.ground_truth.excitation.specs import ExcitationJitter
 from economic_models.ground_truth.models.growth.excitation.specs import GovSpendingSpec
 from economic_models.run import Run, Scenario
@@ -97,6 +106,33 @@ class WorldConfig:
     #: is a spread over worlds as well as over shocks, which is the honest object
     #: when the live run is one draw from it.
     deploy_jitter: float = 0.0
+    #: how many rows of the history training episodes may fork from. One is the
+    #: original behaviour -- every episode starts from the state the history ends
+    #: in. Above one, the training bank is spread evenly over ``n_starts`` rows
+    #: ending at that same last one, and an episode starts wherever its future
+    #: was forked from.
+    #:
+    #: The end of a run is *one draw* from the economy's state distribution, and
+    #: being one draw it is reliably an extreme of something -- across world seeds
+    #: it lands at the 95th percentile of the historic bill rate, or the 99th of
+    #: inflation, or the very minimum of ``ro``. Every training episode starting
+    #: there conditions the policy on that corner, and under the delta instrument
+    #: it conditions it on that corner's *lever positions* too, since the levers
+    #: integrate from wherever the economy hands them over. Fifty steps cannot
+    #: undo it: the persistent features (the rate block, ``GD/Y``, ``theta``)
+    #: move through less than half their historic spread inside an episode, so a
+    #: single-start agent never sees a low-rate or high-debt regime at all.
+    #:
+    #: Only the **training** bank is spread. The evaluation and deployment banks
+    #: fork off the history's end as they always have, so a score is comparable
+    #: across settings of this and the live deployment still starts where the
+    #: history stops.
+    n_starts: int = 1
+    #: rows at the head of the history no training episode forks from. The proxy
+    #: rollout and the observation both start an episode from a belief filtered
+    #: over the prefix, and a filter given a short prefix is still at its prior;
+    #: this is the burn-in that buys convergence before a row is usable as a start.
+    start_burn_in: int = 100
     seed: int = 0  #: seeds the history and (offset) every future
 
     def __post_init__(self) -> None:
@@ -117,6 +153,22 @@ class WorldConfig:
                 raise ValueError(f"{name} must be non-negative, got {getattr(self, name)}")
         if self.deploy_jitter < 0.0:
             raise ValueError(f"deploy_jitter must be non-negative, got {self.deploy_jitter}")
+        if self.n_starts < 1:
+            raise ValueError(f"n_starts must be at least 1, got {self.n_starts}")
+        if self.start_burn_in < 0:
+            raise ValueError(
+                f"start_burn_in must be non-negative, got {self.start_burn_in}"
+            )
+        if self.n_starts > 1 and self.start_burn_in >= self.history_steps - 1:
+            raise ValueError(
+                f"a {self.history_steps}-step history has no rows left to start from "
+                f"after a burn-in of {self.start_burn_in}"
+            )
+        if self.n_starts > self.n_train_futures:
+            raise ValueError(
+                f"{self.n_starts} start points but only {self.n_train_futures} "
+                "training futures to spread over them"
+            )
         if self.deploys_differently and self.n_deploy_futures < 1:
             raise ValueError(
                 "a deployment economy was configured but no bank was asked for: "
@@ -162,18 +214,42 @@ class WorldConfig:
 
 
 @dataclass(frozen=True)
+class BranchPoint:
+    """A row of the history an episode may start from, and the state it is in.
+
+    ``row`` indexes the history; ``state`` is the full internal ground-truth
+    state there, which is what pins a solver, and the trailing level rows of the
+    history up to ``row`` are what warm-starts a proxy and an observation. A
+    future forked here (:class:`~economic_models.ground_truth.excitation.base.BranchCapture`)
+    resumes the excitation exactly where this row left it, which is why a future
+    belongs to its branch point and cannot be spliced onto another.
+    """
+
+    row: int  #: index into the history
+    state: Mapping[str, float]  #: full internal ground-truth state at that row
+
+
+@dataclass(frozen=True)
 class Episode:
     """One exogenous future the agent is asked to steer through.
 
     ``params`` are the bank-visible :class:`~economic_models.variables.Parameters`
     per step and ``hidden`` the hidden structural parameters (invisible to the
     agent, but needed to drive the ground-truth model); ``index`` identifies the
-    future for logging and replay.
+    future for logging and replay; ``branch`` is where the economy stands when
+    this future begins.
+
+    Carrying the branch **on the episode** is what lets a bank be spread over
+    several start points without anything downstream changing: a future and the
+    state it forks from are drawn together, and every caller that already hands
+    the environment a particular episode (an evaluation sweep, a recorded
+    rollout, a deployment) goes on getting the start that episode was drawn for.
     """
 
     params: np.ndarray  # (horizon, n_params) visible exogenous path
     hidden: np.ndarray | None  # (horizon, n_hidden) hidden structural path
     index: int
+    branch: BranchPoint
 
     def __len__(self) -> int:
         """The number of steps this episode's forcing lasts."""
@@ -263,12 +339,35 @@ class NullStabilizer:
 class EpisodeBank:
     """A fixed pool of exogenous futures to draw episodes from."""
 
-    def __init__(self, futures: list[Scenario], offset: int = 0) -> None:
-        """Hold ``futures`` as episodes numbered from ``offset``."""
+    def __init__(
+        self,
+        futures: list[Scenario],
+        offset: int = 0,
+        branches: Sequence[BranchPoint] | BranchPoint | None = None,
+    ) -> None:
+        """Hold ``futures`` as episodes numbered from ``offset``.
+
+        ``branches`` says where each future forks from: one branch point for the
+        whole bank (the usual case -- an evaluation or deployment bank all forks
+        off the history's end) or one per future (a training bank spread over
+        several start points).
+        """
+        if branches is None or isinstance(branches, BranchPoint):
+            branches = [branches] * len(futures)
+        elif len(branches) != len(futures):
+            raise ValueError(
+                f"{len(branches)} branch points for {len(futures)} futures"
+            )
         self._episodes = [
-            Episode(params=s.params, hidden=s.hidden, index=offset + j)
-            for j, s in enumerate(futures)
+            Episode(params=s.params, hidden=s.hidden, index=offset + j, branch=b)
+            for j, (s, b) in enumerate(zip(futures, branches))
         ]
+
+    @property
+    def branch_rows(self) -> tuple[int, ...]:
+        """The distinct history rows this bank's futures fork from, in order."""
+        rows = {e.branch.row for e in self._episodes if e.branch is not None}
+        return tuple(sorted(rows))
 
     def __len__(self) -> int:
         """The number of futures in the pool."""
@@ -310,14 +409,50 @@ class TrainingWorld:
         """Length of one step in years."""
         return self.config.dt
 
-    def window(self, rows: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """The trailing ``rows`` level rows of the history: the warm start."""
-        if rows > len(self.history):
+    @property
+    def branch_point(self) -> BranchPoint:
+        """The history's end: the branch an evaluation or deployment starts from."""
+        return BranchPoint(row=len(self.history) - 1, state=self.branch)
+
+    @property
+    def start_rows(self) -> tuple[int, ...]:
+        """The history rows training episodes fork from, in order."""
+        return self.train_futures.branch_rows
+
+    def window(self, rows: int, end: int | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """The ``rows`` level rows of the history ending at ``end``: a warm start.
+
+        ``end`` is an *exclusive* bound defaulting to the whole history, so the
+        default is the trailing window it has always been; a branch point passes
+        its own row plus one and gets the prefix ending there instead.
+        """
+        end = len(self.history) if end is None else end
+        if not 0 < rows <= end <= len(self.history):
             raise ValueError(
-                f"history has {len(self.history)} rows, need {rows} to warm-start"
+                f"a {len(self.history)}-row history cannot supply {rows} rows "
+                f"ending at {end}"
             )
         h = self.history
-        return h.states[-rows:], h.params[-rows:], h.actions[-rows:]
+        return (
+            h.states[end - rows : end],
+            h.params[end - rows : end],
+            h.actions[end - rows : end],
+        )
+
+
+def start_rows(config: WorldConfig) -> tuple[int, ...]:
+    """The history rows training futures fork from, ending at the last one.
+
+    ``n_starts`` rows spread evenly over the history past its burn-in, the last
+    of which is always the history's end -- so raising ``n_starts`` *adds* start
+    points to the one that was always there rather than moving it, and
+    ``n_starts=1`` is exactly the original single branch.
+    """
+    end = config.history_steps - 1
+    if config.n_starts == 1:
+        return (end,)
+    rows = np.linspace(config.start_burn_in, end, config.n_starts)
+    return tuple(sorted({int(round(r)) for r in rows}))
 
 
 def build_world(config: WorldConfig | None = None, *, verbose: bool = True) -> TrainingWorld:
@@ -325,6 +460,12 @@ def build_world(config: WorldConfig | None = None, *, verbose: bool = True) -> T
 
     Only the history solves the structural model; the futures are drawn from the
     excitation process alone. ``verbose`` prints a one-line progress report.
+
+    With :attr:`WorldConfig.n_starts` above one the *training* futures are dealt
+    round-robin over several rows of the history (:func:`start_rows`) and forked
+    from the excitation as it stood at each -- the evaluation and deployment
+    banks still fork off the end, and their seeds do not move, so a score is
+    comparable across settings of ``n_starts``.
     """
     config = config or WorldConfig()
     excitation = config.excitation_config()
@@ -344,20 +485,30 @@ def build_world(config: WorldConfig | None = None, *, verbose: bool = True) -> T
     configs = (
         None if deploy_configs is None else [None] * n_offline + list(deploy_configs)
     )
+    # Dealt round-robin rather than in contiguous blocks, so that any prefix of
+    # the training bank is spread over every start point -- a bank truncated for
+    # a short run is then still a multi-start bank.
+    rows = start_rows(config)
+    end = config.history_steps - 1
+    branch_at = [rows[j % len(rows)] for j in range(config.n_train_futures)]
+    branch_at += [end] * (n_futures - config.n_train_futures)
 
     if verbose:
         print(
             f"world: simulating {config.history_steps} steps at dt={config.dt} "
             f"({config.excitation} excitation, seed={config.seed})..."
         )
-    history, futures, branch = generator.generate_with_continuations(
+    history, futures, captures = generator.generate_branched(
         config.history_steps,
         config.horizon,
         n_futures,
+        branch_at=branch_at,
         seed=config.seed,
         continuation_seeds=seeds,
         continuation_configs=configs,
     )
+    branch = captures[end].state
+    branches = [BranchPoint(row=t, state=captures[t].state) for t in branch_at]
     if len(history) < config.history_steps:
         raise RuntimeError(
             f"the history collapsed after {len(history)}/{config.history_steps} steps "
@@ -376,21 +527,34 @@ def build_world(config: WorldConfig | None = None, *, verbose: bool = True) -> T
                  f"({config.deploy_excitation or config.excitation} excitation"
                  f"{jittered})"
         )
+        started = (
+            ""
+            if len(rows) == 1
+            else f" from {len(rows)} start rows (history {rows[0]}..{rows[-1]})"
+        )
         print(
             f"world: history of {len(history)} steps "
             f"({history.dampened_steps} dampened), "
-            f"{config.n_train_futures} train / {config.n_eval_futures} eval futures"
-            f"{deployed}"
+            f"{config.n_train_futures} train{started} / {config.n_eval_futures} "
+            f"eval futures{deployed}"
         )
 
+    terminal = BranchPoint(row=end, state=branch)
     return TrainingWorld(
         history=history,
         branch=branch,
-        train_futures=EpisodeBank(futures[: config.n_train_futures]),
-        eval_futures=EpisodeBank(
-            futures[config.n_train_futures : n_offline], offset=config.n_train_futures
+        train_futures=EpisodeBank(
+            futures[: config.n_train_futures],
+            branches=branches[: config.n_train_futures],
         ),
-        deploy_futures=EpisodeBank(futures[n_offline:], offset=n_offline),
+        eval_futures=EpisodeBank(
+            futures[config.n_train_futures : n_offline],
+            offset=config.n_train_futures,
+            branches=terminal,
+        ),
+        deploy_futures=EpisodeBank(
+            futures[n_offline:], offset=n_offline, branches=terminal
+        ),
         stabilizer=FiscalStabilizer(
             excitation.gov_spending, GROWTH_INTERFACE.parameters.names()
         ),

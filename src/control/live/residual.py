@@ -48,7 +48,7 @@ makes the ablation of §8.2 a one-line change.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable
+from typing import Callable, Sequence
 
 import numpy as np
 
@@ -66,6 +66,19 @@ def design(z: np.ndarray, u_next: np.ndarray, f_prev: np.ndarray) -> np.ndarray:
     building a design does not have to know about it.
     """
     return np.hstack([z, u_next, f_prev])
+
+
+def action_columns(proxy: BaseProxyModel, width: int) -> np.ndarray:
+    """The columns of a :func:`design` row that carry the policy's own levers.
+
+    A design row is ``[z, u_next, f_prev]`` and ``u_next`` is the parameters
+    followed by the actions, so the action block ends exactly where ``f_prev``
+    begins -- which is fixed by the width of a state-feature row regardless of
+    how wide the latent is.
+    """
+    n_feat = len(proxy.transform.state_feature_names)
+    n_act = len(proxy.ACTIONS.names())
+    return np.arange(width - n_feat - n_act, width - n_feat)
 
 
 # -- the noise half ---------------------------------------------------------
@@ -298,6 +311,7 @@ class ResidualModel(Residual):
         kappa: float = 0.2,
         bias_decay: float | None = None,
         noise: ResidualNoise | None = None,
+        ignore: Sequence[int] | None = None,
     ) -> None:
         """Configure the two halves of the correction.
 
@@ -310,6 +324,19 @@ class ResidualModel(Residual):
         much of that bias survives one step of a synthetic rollout, defaulting to
         the ``1 - kappa`` that makes the pair an AR(1). ``noise`` is the
         predictive-spread model (Gaussian by default).
+
+        ``ignore`` names design columns the correction is not allowed to read,
+        and exists for one of them: the **action block**. A correction fitted on
+        a live run sees levers that a policy moved in response to the state, so
+        those columns are a near-exact function of the rest of the design (a
+        variance inflation upwards of a thousand) and their coefficients are
+        decided by the prior rather than by the data. That costs nothing in
+        forecast -- they carry under a thirtieth of the error reduction -- and
+        everything in control, because a policy is determined by exactly the
+        derivative those coefficients rewrite. Ignoring them leaves the proxy's
+        own response to the instrument in place, which was identified honestly:
+        the history excites the levers as independent AR(1) processes precisely
+        so that it would be.
         """
         self.n_outputs = n_outputs
         self.tau = tau
@@ -317,6 +344,10 @@ class ResidualModel(Residual):
         self.kappa = kappa
         self.bias_decay = (1.0 - kappa) if bias_decay is None else bias_decay
         self.noise_ = noise or GaussianResidualNoise(n_outputs)
+        # ``ignore or ()`` would truth-test a numpy array; the caller's block
+        # of column indices is usually exactly that.
+        self.ignore = tuple(sorted({int(c) for c in (() if ignore is None else ignore)}))
+        self.keep_: np.ndarray | None = None  # design columns actually read
 
         self.mean_: np.ndarray | None = None  # design standardisation, frozen
         self.std_: np.ndarray | None = None
@@ -360,11 +391,20 @@ class ResidualModel(Residual):
                 f"residuals are {E.shape[1]}-wide, model was built for {self.n_outputs}"
             )
 
-        std = X.std(axis=0)
-        self.mean_ = X.mean(axis=0)
+        bad = [c for c in self.ignore if not 0 <= c < X.shape[1]]
+        if bad:
+            raise ValueError(
+                f"ignore names column(s) {bad} outside a {X.shape[1]}-wide design"
+            )
+        self.keep_ = np.array(
+            [c for c in range(X.shape[1]) if c not in self.ignore], dtype=int
+        )
+        kept = X[:, self.keep_]
+        std = kept.std(axis=0)
+        self.mean_ = kept.mean(axis=0)
         self.std_ = np.where(std > 1e-12, std, 1.0)
 
-        d = X.shape[1] + 1  # + intercept
+        d = len(self.keep_) + 1  # + intercept
         self.psi_ = np.zeros((d, self.n_outputs))
         self.P_ = self.tau**2 * np.eye(d)
         # Start the per-dimension noise scale at the residuals' own variance: the
@@ -467,9 +507,16 @@ class ResidualModel(Residual):
     # -- internals ------------------------------------------------------------
 
     def _row(self, x: np.ndarray) -> np.ndarray:
-        """Standardise one design row and append the intercept."""
+        """Drop the ignored columns, standardise, and append the intercept.
+
+        Callers keep handing over the *whole* design row -- the correction's
+        blind spots are its own business, not theirs -- so the selection happens
+        here and nowhere else.
+        """
         assert self.mean_ is not None and self.std_ is not None
-        return np.append((np.asarray(x, dtype=float) - self.mean_) / self.std_, 1.0)
+        assert self.keep_ is not None
+        x = np.asarray(x, dtype=float)[self.keep_]
+        return np.append((x - self.mean_) / self.std_, 1.0)
 
     def _require_seeded(self) -> None:
         """Raise a clear error before :meth:`seed` has fixed the design."""

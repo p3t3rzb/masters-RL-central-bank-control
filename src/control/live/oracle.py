@@ -53,7 +53,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import multiprocessing
 import os
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -61,6 +60,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
+
+from parallel import guarded_pool, terminate
 
 from control.dsac.train import (
     build_truth_env,
@@ -257,7 +258,8 @@ class _Evaluator:
     final re-run of the best genome go through it -- and, above one worker, a
     spawned process pool whose workers each hold an environment of their own.
     ``close`` must be called (``optimal_run`` does, in a ``finally``) or the
-    pool's processes outlive the search.
+    pool's processes outlive the search -- though a worker whose parent dies
+    before it can (a ``SIGKILL``) stops itself, see :mod:`parallel.pool`.
     """
 
     def __init__(
@@ -282,11 +284,8 @@ class _Evaluator:
         workers = min(workers, oracle.population)
         self.pool: ProcessPoolExecutor | None = None
         if workers > 1:
-            self.pool = ProcessPoolExecutor(
+            self.pool = guarded_pool(
                 workers,
-                # Spawn rather than fork, explicitly: the parent holds torch and
-                # a solver mid-state, neither of which survives forking safely.
-                mp_context=multiprocessing.get_context("spawn"),
                 initializer=_worker_init,
                 initargs=(world, observer, reward, config, horizon, episode, seed),
             )
@@ -301,9 +300,15 @@ class _Evaluator:
         return list(self.pool.map(_worker_run, paths))
 
     def close(self) -> None:
-        """Shut the pool down, if one was started."""
+        """Stop the pool, if one was started.
+
+        :func:`~parallel.pool.terminate` rather than ``shutdown``: a search that
+        is being torn down has its evaluations in hand already, and a search that
+        is unwinding from an interrupt would otherwise sit here evaluating the
+        rest of the generation it no longer has a use for.
+        """
         if self.pool is not None:
-            self.pool.shutdown()
+            terminate(self.pool)
             self.pool = None
 
 
