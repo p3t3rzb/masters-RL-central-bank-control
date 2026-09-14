@@ -8,6 +8,7 @@ this module adds only the spec that encodes GROWTH's own fiscal stabilizer.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from typing import ClassVar
 
 import numpy as np
 
@@ -36,6 +37,13 @@ class GovSpendingSpec:
     gap_clip: float  #: maximum absolute gap to productivity growth
     stabilizer: float  #: countercyclical gain on the employment gap ``1 - ER``
     bounds: tuple[float, float]  #: hard clip on the resulting growth rate
+
+    #: The visible parameter this response moves.
+    target: ClassVar[str] = "GRg"
+
+    def support(self, er_prev: float) -> float:
+        """The countercyclical addition to spending at employment rate ``er_prev``."""
+        return self.stabilizer * (1.0 - er_prev)
 
     def gap_spec(self) -> AR1Spec:
         """The gap to productivity growth as an :class:`AR1Spec` around 0."""

@@ -333,11 +333,13 @@ def _taylor_path(
     """
     policy = taylor_policy(
         env, result.observer, dt=result.config.dt,
-        pi_target=result.config.pi_target,
+        pi_target=result.config.pi_target, model=result.world.config.model,
     )
     obs, _ = env.reset(seed=seed, episode=episode)
     reset_policy(policy)
-    path = np.tile(env.to_normalised(calibration_actions()), (steps, 1))
+    path = np.tile(
+        env.to_normalised(calibration_actions(result.world.config.model)), (steps, 1)
+    )
     for t in range(steps):
         obs, _, terminated, truncated, info = env.step(policy(obs))
         if terminated:
@@ -369,7 +371,8 @@ def _seed_population(
     them rather than on rediscovering that the box has a sensible middle.
     """
     calibration = np.tile(
-        env.to_normalised(calibration_actions()), (len(knot_times), 1)
+        env.to_normalised(calibration_actions(result.world.config.model)),
+        (len(knot_times), 1),
     ).ravel()
     taylor = _taylor_path(env, result, episode, steps, seed=seed)[knot_times].ravel()
     population = [calibration, taylor]

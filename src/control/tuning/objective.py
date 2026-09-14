@@ -35,7 +35,6 @@ from typing import TYPE_CHECKING, Any, Iterator, Sequence
 
 import numpy as np
 
-from economic_models.ground_truth import GROWTH_INTERFACE
 from parallel import guarded_pool, terminate
 
 from control.dataset import group_count, load_world
@@ -205,9 +204,11 @@ def build_env(
     return CentralBankEnv(
         GroundTruthDriver(world, iterations=config.iterations),
         world.eval_futures,
-        MandateReward(config.pi_target),
+        MandateReward(
+            config.pi_target, employment_target=world.config.spec.employment_target
+        ),
         observer,
-        GROWTH_INTERFACE,
+        world.config.spec.interface,
         EnvConfig(
             collapse_penalty=config.collapse_penalty,
             horizon=config.horizon or world.config.horizon,

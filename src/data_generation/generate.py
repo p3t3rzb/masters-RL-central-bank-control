@@ -40,7 +40,8 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from economic_models.ground_truth import GrowthExcitationConfig, GrowthRunGenerator
+from economic_models.ground_truth.excitation.base import ExcitedRunGenerator
+from economic_models.ground_truth.registry import ground_truth
 from parallel import managed_pool
 
 from data_generation import storage
@@ -82,14 +83,11 @@ class _GroupResult:
     resamples: int  #: collapsed attempts discarded before this group succeeded
 
 
-def _build_generator(config: DatasetConfig) -> GrowthRunGenerator:
-    """Construct the run generator for ``config``'s excitation regime and timestep."""
-    excitation = (
-        GrowthExcitationConfig.realistic()
-        if config.excitation == "realistic"
-        else GrowthExcitationConfig.default()
-    )
-    return GrowthRunGenerator(
+def _build_generator(config: DatasetConfig) -> ExcitedRunGenerator:
+    """Construct the run generator for ``config``'s model, excitation and timestep."""
+    spec = ground_truth(config.model)
+    excitation = spec.excitation_config(config.excitation)
+    return spec.generator(
         excitation,
         dt=config.dt,
         burn_in=config.burn_in,
@@ -133,7 +131,7 @@ def _attempt_seeds(
 
 
 def generate_group(
-    task: _GroupTask, config: DatasetConfig, generator: GrowthRunGenerator
+    task: _GroupTask, config: DatasetConfig, generator: ExcitedRunGenerator
 ) -> _GroupResult:
     """Generate one group with ``generator`` and write its runs under ``config.output_dir``.
 
@@ -189,7 +187,7 @@ def generate_group(
 # One generator per worker process, built lazily on first use and reused for
 # every group that process handles -- building the pysolve model is the one
 # non-trivial per-model cost, so it is paid once per worker, not once per group.
-_WORKER_GENERATOR: GrowthRunGenerator | None = None
+_WORKER_GENERATOR: ExcitedRunGenerator | None = None
 _WORKER_CONFIG: DatasetConfig | None = None
 
 
@@ -214,11 +212,8 @@ def generate_dataset(config: DatasetConfig, *, verbose: bool = True) -> dict:
     and returns it. The manifest records the config, the interface column order
     and a per-group summary, so the dataset is self-describing on disk.
     """
-    from economic_models.ground_truth.models.growth import (
-        GrowthActions as Actions,
-        GrowthParameters as Parameters,
-        GrowthState as State,
-    )
+    interface = ground_truth(config.model).interface
+    State, Parameters, Actions = interface.state, interface.parameters, interface.actions
 
     tasks = plan_tasks(config)
     workers = min(config.resolved_workers(), len(tasks))

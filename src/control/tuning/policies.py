@@ -30,7 +30,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Mapping
 
-from economic_models.ground_truth import GROWTH_INTERFACE
 
 from control.dsac.train import Policy, taylor_policy
 from control.env import CentralBankEnv
@@ -115,7 +114,7 @@ class TunablePolicy(ABC):
         re-deriving them per economy would move the agent's inputs under it. That
         is why ``prepared`` is passed: it is where such an observer would be kept.
         """
-        return Observer(GROWTH_INTERFACE).fit(world.history)
+        return Observer(world.config.spec.interface).fit(world.history)
 
     @property
     def free_instrument(self) -> bool:

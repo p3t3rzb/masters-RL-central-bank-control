@@ -65,6 +65,15 @@ class CorrectedProxy(BaseProxyModel):
         self.proxy = proxy
         self.residual = residual or NullResidual(len(self.transform.state_feature_names))
         self._depth = 0
+        #: predictive variance of the step just taken, per state feature.
+        #:
+        #: Recorded rather than returned because the proxy interface has one
+        #: return value and every caller downstream wants the state. A caller
+        #: that wants to be *pessimistic* about an imagined step -- charging a
+        #: synthetic rollout for what the model does not know, which is the one
+        #: thing that makes a large model-based policy step safe -- reads it
+        #: here, immediately after :meth:`step`. Zero until the first step.
+        self.last_variance_ = np.zeros(len(self.transform.state_feature_names))
         # The wrapped proxy is already fitted; this object adds no parameters of
         # its own, so it is usable immediately.
         self._fitted = True
@@ -89,6 +98,7 @@ class CorrectedProxy(BaseProxyModel):
         x = design(ctx.z, ctx.u_next, ctx.f_prev)
         base = self.proxy.predict_mean(ctx)
         mean = base + self.residual.correction(x, self._depth)
+        self.last_variance_ = self.residual.variance(x)
         if rng is None:
             return mean
         return mean + self.residual.noise(self.proxy.sample(ctx, rng) - base, x, rng)

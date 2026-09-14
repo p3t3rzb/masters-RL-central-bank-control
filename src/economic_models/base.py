@@ -13,6 +13,18 @@ from typing import ClassVar
 from economic_models.variables import Actions, Parameters, State
 
 
+class ModelStepFailure(RuntimeError):
+    """A model could not produce a next period from the inputs it was given.
+
+    The model-agnostic name for what pysolve reports as a ``CalculationError``
+    and a rational-expectations model reports as an indeterminate system or a
+    lower bound that will not resolve. Raising a common type is what lets the run
+    generator's dampening retry -- halve the distance to the last set of inputs
+    that worked, and try again -- serve every model family rather than only the
+    one it was written for.
+    """
+
+
 class BaseEconomicModel(ABC):
     """The central-bank-visible interface shared by every economic model.
 

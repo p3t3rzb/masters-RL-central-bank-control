@@ -37,6 +37,7 @@ from control.live.corrected import CorrectedProxy, CorrectedRolloutState
 from control.live.deploy import (
     TAYLOR_GAINS,
     FORCINGS,
+    ONLINE_POLICIES,
     LiveConfig,
     RehearsalResult,
     RunRecord,
@@ -105,4 +106,5 @@ __all__ = [
     "build_residual",
     "build_forcing",
     "FORCINGS",
+    "ONLINE_POLICIES",
 ]

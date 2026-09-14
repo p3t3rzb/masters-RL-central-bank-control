@@ -15,9 +15,30 @@ model-specific specs alongside.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Mapping
+from typing import Protocol, Mapping
 
 import numpy as np
+
+
+
+class SpendingResponse(Protocol):
+    """What a countercyclical fiscal response has to offer, whatever model it is in.
+
+    Each ground truth's excitation carries a spec describing how government
+    spending leans against a downturn. The models disagree about the details --
+    which parameter moves, and what employment rate counts as no shortfall -- but
+    agree on this much, which is all the rollout-time stabiliser in
+    :class:`~control.world.FiscalStabilizer` needs to know.
+    """
+
+    #: The visible parameter the response moves.
+    target: str
+    #: Hard limits the response is clipped into.
+    bounds: tuple[float, float]
+
+    def support(self, er_prev: float) -> float:
+        """The addition to spending at employment rate ``er_prev``."""
+        ...
 
 
 @dataclass(frozen=True)

@@ -25,7 +25,7 @@ from __future__ import annotations
 import copy
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Sequence
 
 import numpy as np
 import torch
@@ -33,7 +33,11 @@ from torch import nn
 
 from economic_models._torch import resolve_device
 
-from control.dsac.networks import QuantileCritic, SquashedGaussianPolicy
+from control.dsac.networks import (
+    GainCorrectedPolicy,
+    QuantileCritic,
+    SquashedGaussianPolicy,
+)
 from control.dsac.replay import Batch
 from control.dsac.risk import MeanRisk, RiskMeasure
 
@@ -288,6 +292,30 @@ class DSACAgent:
         measure the optimiser rather than the update.
         """
         return copy.deepcopy(self)
+
+    def restrict_actor(self, features: Sequence[int], *, lr: float) -> None:
+        """Freeze the offline actor and fine-tune a small reaction gain on top.
+
+        The online phase of :mod:`control.live` has a few hundred transitions
+        against the hundred thousand the actor was built from, and the honest
+        response is not a smaller learning rate on seventy thousand weights --
+        that only makes the step small, it does not make it *identifiable*. This
+        makes it identifiable: the policy becomes
+        :class:`~control.dsac.networks.GainCorrectedPolicy`, the offline mean
+        plus a linear reaction on ``features`` observation channels, and the
+        optimiser is rebuilt over that reaction alone.
+
+        The gain starts at zero, so the restricted policy is indistinguishable
+        from the one it replaces until an update moves it -- which is what lets
+        the acceptance test read the update as the only difference. The critics
+        and the temperature are untouched: they are not deployed, and starving
+        them of capacity would only make the value estimate worse.
+
+        Irreversible on the agent it is called on. Call it on the clone, not on
+        the policy being anchored to or fallen back on.
+        """
+        self.actor = GainCorrectedPolicy(self.actor, features).to(self.device)
+        self.actor_opt = torch.optim.Adam(self.actor.gain.parameters(), lr=lr)
 
     def set_lr(self, actor: float | None = None, critic: float | None = None) -> None:
         """Retune the learning rates of an already-built agent.

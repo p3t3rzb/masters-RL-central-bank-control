@@ -106,6 +106,7 @@ from control.live.residual import (
     ResidualModel,
     cross_fitted_residuals,
     design,
+    fitted_gate,
     in_sample_residuals,
 )
 from control.rewards import RewardContext
@@ -116,6 +117,9 @@ if TYPE_CHECKING:
 
 #: The forcing families a deployment can forecast its exogenous environment with.
 FORCINGS = ("var", "bootstrap", "oracle")
+
+#: What the online phase may fine-tune. See :attr:`LiveConfig.online_policy`.
+ONLINE_POLICIES = ("full", "gain")
 
 
 @dataclass(frozen=True)
@@ -133,7 +137,12 @@ class LiveConfig:
     warmup: int = 20  #: live steps before the first policy update
     update_every: int = 4  #: real steps between policy updates (a year)
     gradient_steps: int = 100  #: DSAC updates per policy update
-    branch_points: int = 400  #: rollouts started per policy update
+    #: rollouts started per policy update. Read together with
+    #: :attr:`rollout_length`: the synthetic data a generation contributes is
+    #: their *product*, so a comparison of two rollout horizons at a fixed
+    #: ``branch_points`` is confounded with the amount of synthetic data, and the
+    #: honest sweep holds the product fixed.
+    branch_points: int = 400
     rollout_length: int = 3  #: nominal k
     rollout_min: int = 1  #: k when the correction is uncertain
     rollout_max: int = 5  #: k when it has been predicting well
@@ -160,6 +169,25 @@ class LiveConfig:
     #: itself. The levers still integrate at instrument speed: this perturbs the
     #: requested step, it does not bypass the instrument.
     explore: float = 0.0
+    #: persistence of the excitation, as an AR(1) coefficient.
+    #:
+    #: At zero the perturbation is white noise on the requested *step*, which is
+    #: what earlier runs used and which is a very weak instrument -- because the
+    #: instrument is a delta. The levers integrate the step, so the design's
+    #: action columns carry the lever *level*, and i.i.d. noise on the step
+    #: contributes a random walk whose low-frequency power is tiny: measured over
+    #: a deployment, excitation at 0.30 normalised units moves the action block's
+    #: variance inflation only from 74x to 20x and the corrected model's cosine
+    #: against the structural economy's own lever response from +0.00 to +0.03.
+    #: Identification of a level response needs excursions that *last*, which is
+    #: also what a deliberate policy experiment looks like when a central bank
+    #: runs one. Read against ``dt``: 0.9 at dt=0.083 is a perturbation with a
+    #: memory of about ten months.
+    #:
+    #: Scaled so that :attr:`explore` remains the standard deviation of the
+    #: perturbation whatever the persistence, which is the only way a sweep over
+    #: one of them is not secretly a sweep over both.
+    explore_rho: float = 0.0
     recency_decay: float = 0.99  #: geometric weight on branch-point age
     #: what a *synthetic* collapse is charged against. The environment prices a
     #: collapse per remaining step of an episode, and a live run has no episode
@@ -210,6 +238,86 @@ class LiveConfig:
     #: "the correction may not touch the levers" is a claim, and a run with it
     #: switched on is what the claim is measured against.
     correct_actions: bool = False
+    #: how much an imagined step is charged for what the model does not know.
+    #:
+    #: The rollout reward becomes ``r - uncertainty_penalty * u``, where ``u`` is
+    #: the correction's own predictive standard deviation in the mandate's three
+    #: columns, expressed in the units the mandate divides by -- so ``u = 1``
+    #: means "one leg's worth of reference deviation of pure model uncertainty"
+    #: and the penalty is on the same scale as the legs themselves.
+    #:
+    #: This is MOPO's term (Yu et al., 2020) and it is the piece the apparatus
+    #: was missing. The predictive variance was already computed every step and
+    #: spent on two things -- choosing ``k`` and tripping the monitor -- while the
+    #: quantity a policy actually optimises never saw it. Inside a rollout the
+    #: variance only scaled a **mean-zero** draw, which adds spread without
+    #: adding caution: under ``risk="mean"`` the actor is indifferent to it, and
+    #: an imagined state the model has no idea about is worth exactly as much as
+    #: one it is sure of.
+    #:
+    #: Why it matters here specifically. The guardrails answer "an update might
+    #: be wrong" by making the update *small* -- a tenth of the learning rate, a
+    #: KL anchor to the offline policy -- and that is measurably a dead end in
+    #: both directions: at the default the step lands below the acceptance test's
+    #: own resolution, and removing the anchor (``--no-anchor --actor-lr 3e-4``)
+    #: moves the policy eight times as far for no gain in the mean and a tail
+    #: that runs to -31 points. A small step is not a safe step, it is an
+    #: undirected one made shorter. Pessimism is the other way to be safe: keep
+    #: the step large and make the model refuse to recommend the places it cannot
+    #: see. Off by default so the pair is the ablation.
+    uncertainty_penalty: float = 0.0
+    #: what the online phase is allowed to fine-tune.
+    #:
+    #: ``"full"`` is the whole actor, which is what MBPO would do and what every
+    #: earlier run here did. ``"gain"`` restricts it to a linear reaction on
+    #: :attr:`gain_features` on top of the frozen offline mean
+    #: (:meth:`~control.dsac.agent.DSACAgent.restrict_actor`) -- a dozen
+    #: parameters instead of seventy thousand.
+    #:
+    #: The case for ``"gain"`` is that "online RL from two hundred samples is not
+    #: a thing" is a claim about parameter counts, and the guardrails answer it
+    #: in the wrong currency: a tenth of the learning rate and a KL anchor make
+    #: the step *small* without making it identifiable, and the acceptance test
+    #: then has to resolve a step measured at three hundredths of the instrument
+    #: against a sampling error of the same size -- which it cannot, and its
+    #: 45% acceptance rate is the coin flip that follows. Twelve parameters is
+    #: inside what a few hundred transitions identify, so the step can be large
+    #: enough for the test to see and still bounded by construction.
+    online_policy: str = "full"
+    #: the observation channels the ``"gain"`` reaction reads, by name.
+    #:
+    #: The mandate's own three by default: those are the only signals the reward
+    #: is a function of, so a reaction to anything else cannot be scored on this
+    #: run's evidence. Named rather than positional because the observation's
+    #: width depends on the encoder and its economic block does not.
+    gain_features: tuple[str, ...] = ("dlog(Yk)", "ER", "PI")
+    #: shrink the correction **per output column**, at a trust fitted out of
+    #: sample on the historic rows (:func:`~control.live.residual.fitted_gate`).
+    #:
+    #: On is the better default and the reason is the mandate. The correction is
+    #: one estimator against a sixteen-wide target, and it is measurably good on
+    #: some of those columns and measurably harmful on others: over the GROWTH
+    #: history, ``dlog(Yk)`` scores an out-of-fold R-squared of +0.24 at this
+    #: prior scale while ``PI`` scores -2.18 and ``ER`` -5.00. Three of the
+    #: sixteen columns are the only ones the reward reads, and two of those three
+    #: are in the second group -- so the un-gated correction cuts the *state*
+    #: error to under half (almost all of it in the equity price, which carries
+    #: 99.5% of the squared error norm and which the mandate never looks at)
+    #: while making the two mandate columns worse. A policy improved against that
+    #: model has been handed a better forecast of something it is not scored on.
+    #:
+    #: Off is the default because the size of the effect is an empirical
+    #: question and the answer, measured, is small: run prequentially over the
+    #: GROWTH history the way a deployment runs it, the correction turns out to
+    #: have *some* skill in every column (``dlog(Yk)`` R-squared +0.77, ``PI``
+    #: +0.15, ``ER`` -0.07), so the fitted trust lands between 0.80 and 0.97
+    #: nearly everywhere and closes nothing. The uneven skill is real and worth
+    #: reporting -- the correction removes 86% of the whole-state error and only
+    #: 31% of the error in the three columns the reward reads -- but it is not
+    #: something a per-column shrinkage can repair, because the columns are not
+    #: *harmful*, only unhelpful. Kept as the switch that establishes that.
+    gate: bool = False
+    gate_floor: float = 0.0  #: the smallest trust a column may be given
 
     # -- the exogenous forecast --
     forcing: str = "var"  #: one of :data:`FORCINGS`
@@ -228,6 +336,11 @@ class LiveConfig:
     guard_monitor: bool = True  #: let the monitor freeze learning when it trips
     guard_fallback: bool = True  #: hand control back after enough trouble
     actor_lr: float = 3e-5  #: ten times below the training-time rate
+    #: the rate the ``"gain"`` reaction is fine-tuned at when the actor-rate
+    #: guardrail is off. A dozen parameters starting from exactly zero can take
+    #: the training-time step without the drift that makes a slow rate necessary
+    #: for the full actor, so the guardrail being off means *this*, not nothing.
+    gain_lr: float = 3e-4
     anchor_weight: float = 1.0  #: strength of the KL pull toward the deployed policy
     accept_branches: int = 128  #: branch points the acceptance test scores over
     #: the functional the acceptance test compares the two policies under, one of
@@ -295,11 +408,21 @@ class LiveConfig:
 
     def __post_init__(self) -> None:
         """Reject a configuration that cannot be run, before anything is built."""
+        if self.online_policy not in ONLINE_POLICIES:
+            raise ValueError(
+                f"online_policy must be one of {ONLINE_POLICIES}, "
+                f"got {self.online_policy!r}"
+            )
         if self.forcing not in FORCINGS:
             raise ValueError(f"forcing must be one of {FORCINGS}, got {self.forcing!r}")
         if self.accept_risk not in (None, "mean", "cvar"):
             raise ValueError(
                 f"accept_risk must be 'mean', 'cvar' or None, got {self.accept_risk!r}"
+            )
+        if not -1.0 < self.explore_rho < 1.0:
+            raise ValueError(
+                f"explore_rho must be a stationary AR(1) coefficient in "
+                f"(-1, 1), got {self.explore_rho}"
             )
         if not 0.0 <= self.real_fraction <= 1.0:
             raise ValueError(f"real_fraction must be in [0, 1], got {self.real_fraction}")
@@ -435,6 +558,7 @@ def residual_seed(
         # what a latent means, or the pooled design has no consistent columns.
         lambda: build_proxy(
             config.proxy,
+            interface=result.world.config.spec.interface,
             encoder=result.proxy.encoder,
             latent=config.latent,
             seed=config.seed,
@@ -451,6 +575,7 @@ def build_residual(
     n_outputs: int,
     *,
     ignore: Sequence[int] | None = None,
+    verbose: bool = False,
 ) -> Residual:
     """A correction primed on the historic rows, or the null one.
 
@@ -464,15 +589,25 @@ def build_residual(
         if live.bootstrap_noise
         else None
     )
-    model = ResidualModel(
-        n_outputs,
+    X, E = seed_rows
+    shared = dict(
         tau=live.tau,
         forgetting=live.forgetting,
         kappa=live.kappa,
-        noise=noise,
         ignore=ignore,
     )
-    X, E = seed_rows
+    # Fitted before the model it gates, on the same rows and by the same
+    # estimator, so the trust per column is the history's own verdict on the
+    # correction rather than a hyperparameter.
+    gate = (
+        fitted_gate(
+            X, E, floor=live.gate_floor, weight=live.history_weight,
+            verbose=verbose, **shared,
+        )
+        if live.gate
+        else None
+    )
+    model = ResidualModel(n_outputs, noise=noise, gate=gate, **shared)
     return model.seed(X, E, weight=live.history_weight)
 
 
@@ -496,6 +631,24 @@ def build_forcing(
     else:
         model = VARForcing(env.interface, stabilizer=stabilizer)
     return model.fit(history)
+
+
+def mandate_columns(proxy: BaseProxyModel, reward: Any) -> np.ndarray:
+    """The state-feature columns the reward reads, or every column if unknown.
+
+    The state features are positionally aligned with the state variables, so a
+    reward that declares which variables it reads
+    (:attr:`~control.rewards.mandate.MandateReward.STATES`) names its own
+    columns. A reward that declares nothing gets all of them, which reduces the
+    mandate-restricted error to the ordinary one rather than to an empty slice.
+    """
+    names = proxy.transform.state_names
+    wanted = getattr(reward, "STATES", None)
+    if not wanted:
+        return np.arange(len(names))
+    return np.array(
+        [names.index(n) for n in wanted if n in names], dtype=int
+    )
 
 
 # -- short rollouts through the corrected model ------------------------------
@@ -543,6 +696,9 @@ class SyntheticRollouts:
         self.dt = env.driver.world.dt
         self._er = env.interface.state.names().index("ER")
         self._n_params = len(env.interface.parameters.names())
+        self._penalty_cols, self._penalty_scale = _uncertainty_scale(
+            model, env.reward, self.dt
+        )
 
     def roll(
         self,
@@ -594,6 +750,21 @@ class SyntheticRollouts:
                 total += penalty
                 break
 
+            # Charged for what the model does not know, before anything else
+            # sees this reward: the same number goes into the replay buffer, the
+            # critic and the acceptance test, so a policy is optimised, scored
+            # and admitted under one consistent degree of caution.
+            penalty = 0.0
+            if self.live.uncertainty_penalty:
+                variance = getattr(self.model, "last_variance_", None)
+                if variance is not None and len(self._penalty_cols):
+                    u = float(
+                        np.linalg.norm(
+                            np.sqrt(np.maximum(variance[self._penalty_cols], 0.0))
+                            / self._penalty_scale
+                        )
+                    )
+                    penalty = self.live.uncertainty_penalty * u
             r = self.env.reward(
                 RewardContext(
                     state=state,
@@ -609,10 +780,46 @@ class SyntheticRollouts:
                     dt=self.dt,
                 )
             )
+            r -= penalty
             rows.append((obs, action, r, next_obs, False))
             total += r
             states, exog, obs = nxt, nxt_exog, next_obs
         return total, rows
+
+
+def _uncertainty_scale(
+    model: BaseProxyModel, reward: Any, dt: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """The mandate's feature columns and the divisor that puts them in leg units.
+
+    An uncertainty penalty is only interpretable if it is measured in the same
+    units as the thing it is subtracted from. Each mandate leg is a squared ratio
+    ``(gap / scale)``, so a predictive standard deviation of ``s`` in that leg's
+    feature contributes ``s / scale`` of normalised deviation -- except for real
+    growth, which the mandate reads as an annualised rate while the feature is a
+    one-period log difference, so its divisor carries an extra ``dt``.
+
+    Returns ``(columns, divisors)``, both empty when the reward declares no
+    states, which switches the penalty off rather than guessing at a scale.
+    """
+    columns = mandate_columns(model, reward)
+    names = model.transform.state_names
+    wanted = getattr(reward, "STATES", ())
+    #: leg scale per declared state, and whether the feature is a rate per period
+    per_state = {
+        "Yk": (getattr(reward, "g_scale", 0.02), True),
+        "ER": (getattr(reward, "u_scale", 0.02), False),
+        "PI": (getattr(reward, "pi_scale", 0.02), False),
+    }
+    divisors = []
+    for name in wanted:
+        if name not in names:
+            continue
+        scale, per_period = per_state.get(name, (0.02, False))
+        divisors.append(scale * dt if per_period else scale)
+    if not divisors:
+        return np.array([], dtype=int), np.array([], dtype=float)
+    return columns, np.array(divisors, dtype=float)
 
 
 # -- one live deployment -----------------------------------------------------
@@ -671,7 +878,21 @@ def deploy(
     # is asking "is this step an improvement", which is a different question.)
     frozen = result.agent
     agent = frozen.clone()
-    if live.guarding("actor_lr"):
+    if live.online_policy == "gain":
+        # Restricted on the clone only: ``frozen`` stays the plain offline
+        # policy, so it is still both a coherent anchor and a parachute that
+        # carries none of the online phase's parameters.
+        missing = [n for n in live.gain_features if n not in observer.names]
+        if missing:
+            raise ValueError(
+                f"gain_features {missing} are not observation channels; "
+                f"this observation has {observer.names}"
+            )
+        agent.restrict_actor(
+            [observer.index(n) for n in live.gain_features],
+            lr=live.actor_lr if live.guarding("actor_lr") else live.gain_lr,
+        )
+    elif live.guarding("actor_lr"):
         agent.set_lr(actor=live.actor_lr)
     anchor_weight = live.anchor_weight if live.guarding("anchor") else 0.0
 
@@ -692,8 +913,18 @@ def deploy(
             None if live.correct_actions
             else action_columns(result.proxy, rows[0].shape[1])
         ),
+        verbose=verbose,
     )
     model = CorrectedProxy(copy.copy(result.proxy), residual)
+    # The three columns the mandate reads, so the record can carry the error
+    # that matters to a policy next to the error over the whole state.
+    mandate = mandate_columns(result.proxy, result.env.reward)
+    # The same conversion the rollout's uncertainty penalty uses, so the record
+    # can report how large that charge actually is per step -- a penalty whose
+    # scale is not known is a penalty whose coefficient cannot be chosen.
+    penalty_cols, penalty_scale = _uncertainty_scale(
+        result.proxy, result.env.reward, world.dt
+    )
 
     real = RealBuffer(
         len(world.history) + live.live_steps + 8, env.obs_dim, env.action_dim
@@ -727,6 +958,11 @@ def deploy(
     # main stream at a different rate, so a shared generator would hand the two
     # arms different excitation and quietly unpair them.
     exciter = np.random.default_rng(live.seed + 7919 + seed)
+    # The excitation's own AR(1) state, shared by the two arms for the same
+    # reason the stream is: they must be perturbed identically or the comparison
+    # stops being about learning from the excited data.
+    shock = np.zeros(env.action_dim)
+    innovation = float(np.sqrt(max(0.0, 1.0 - live.explore_rho**2)))
     # Which half of the branch states trains the candidate and which scores it.
     # ``None`` on both is the unsplit behaviour: one pool, used for both.
     fit_half = 0 if live.holdout_branches else None
@@ -736,9 +972,11 @@ def deploy(
     for t in range(1, steps + 1):
         requested = agent.act(obs, deterministic=True)
         if live.explore:
+            shock = live.explore_rho * shock + innovation * exciter.standard_normal(
+                env.action_dim
+            )
             requested = np.clip(
-                requested + live.explore * exciter.standard_normal(len(requested)),
-                -1.0, 1.0,
+                requested + live.explore * shock, -1.0, 1.0
             )
         next_obs, reward, terminated, truncated, info = env.step(requested)
         # What the instrument actually did, which is what the buffer must record.
@@ -801,7 +1039,21 @@ def deploy(
                 **tracker.observe(state, params, actions),
                 "error_raw": float(np.linalg.norm(eps)),
                 "error_corrected": float(np.linalg.norm(corrected_error)),
+                "error_raw_mandate": float(np.linalg.norm(eps[mandate])),
+                "error_corrected_mandate": float(
+                    np.linalg.norm(corrected_error[mandate])
+                ),
                 "residual_var": reading.variance,
+                "uncertainty": (
+                    float(
+                        np.linalg.norm(
+                            np.sqrt(np.maximum(variance[penalty_cols], 0.0))
+                            / penalty_scale
+                        )
+                    )
+                    if len(penalty_cols)
+                    else 0.0
+                ),
                 "bias": float(np.linalg.norm(residual.bias)),
                 "clipped": reading.clipped,
                 "tripped": float(reading.tripped),
@@ -854,6 +1106,12 @@ def deploy(
                 else None
             )
             accepted = test.accepted
+            # What the test was asked to resolve, alongside its verdict: a step
+            # smaller than the test's own error is not a rejected improvement,
+            # it is an improvement nobody could have measured.
+            step_size, drift = _displacement(
+                candidate, agent, frozen, real, live, rng
+            )
             record.events_.append(
                 {
                     "step": t,
@@ -862,6 +1120,8 @@ def deploy(
                     "margin": test.margin,
                     **({} if insample is None else {"margin_insample": insample}),
                     "error": test.error,
+                    "move": step_size,
+                    "drift": drift,
                 }
             )
             if accepted:
@@ -949,18 +1209,21 @@ def run_reference(
         result.world, result.observer, result.env.reward,
         free_instrument(result.config), seed=seed, horizon=live.live_steps,
     )
-    if policy_name in TAYLOR_GAINS:
-        phi_pi, phi_y = TAYLOR_GAINS[policy_name]
+    model = result.world.config.model
+    gains = result.world.config.spec.reference_gains
+    if policy_name in gains:
+        phi_pi, phi_y = gains[policy_name]
         policy = taylor_policy(
             env, result.observer, dt=result.config.dt,
             pi_target=result.config.pi_target, phi_pi=phi_pi, phi_y=phi_y,
+            model=model,
         )
     elif policy_name == "calibration":
-        policy = constant_policy(env, calibration_actions())
+        policy = constant_policy(env, calibration_actions(model))
     else:
         raise ValueError(
-            f"unknown reference policy {policy_name!r}; expected one of "
-            f"{(*TAYLOR_GAINS, 'calibration')}"
+            f"unknown reference policy {policy_name!r} for model {model!r}; "
+            f"expected one of {(*gains, 'calibration')}"
         )
 
     record = RunRecord(name=policy_name, episode=episode.index)
@@ -1250,6 +1513,48 @@ def _mix(
         next_obs=np.vstack([a.next_obs, b.next_obs]),
         done=np.vstack([a.done, b.done]),
     )
+
+
+def _displacement(
+    candidate: DSACAgent,
+    incumbent: DSACAgent,
+    offline: DSACAgent,
+    real: RealBuffer,
+    live: LiveConfig,
+    rng: np.random.Generator,
+) -> tuple[float, float]:
+    """How far the candidate has moved, in the actor's own normalised units.
+
+    The acceptance margin says whether an update helped; it cannot say whether
+    there *was* an update. This is the missing half: the mean absolute
+    difference between what two policies request at the same real states, in the
+    normalised step the actor emits -- so 1.0 is the whole instrument, one
+    period's travel being :attr:`~control.env.CentralBankEnv.delta_step` of the
+    box, and a difference held for a whole deployment moves the levers by
+    ``move * delta_step * live_steps / 2`` of it.
+
+    Two numbers, because they answer different questions. Against the
+    **incumbent** it is the size of this step, which is what the acceptance test
+    is trying to resolve -- a step far below the test's own sampling error is
+    one the test cannot see whatever its tolerance. Against the **offline**
+    policy it is the total drift, which is what the anchor bounds and what
+    ultimately has to be large enough to matter: a deployment whose policy ends
+    a hundredth of the box from where it started cannot have closed a gap that
+    a tenth of the box wide.
+
+    Measured deterministically on states the run actually visited, since a
+    difference of two squashed means is what would actually reach the levers.
+    """
+    batch = real.sample(min(256, len(real)), rng)
+    with torch.no_grad():
+        moves = []
+        for other in (incumbent, offline):
+            gap = np.abs(
+                np.stack([candidate.act(o, deterministic=True) for o in batch.obs])
+                - np.stack([other.act(o, deterministic=True) for o in batch.obs])
+            )
+            moves.append(float(gap.mean()))
+    return moves[0], moves[1]
 
 
 @dataclass(frozen=True)

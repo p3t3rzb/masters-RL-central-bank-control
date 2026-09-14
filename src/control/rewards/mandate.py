@@ -32,6 +32,19 @@ from control.rewards.base import RewardContext, RewardFunction
 class MandateReward(RewardFunction):
     """Minimise unemployment, hold growth at potential, hit the inflation target."""
 
+    #: The state variables the mandate reads, and nothing else does.
+    #:
+    #: Declared because a world model is fitted against the *whole* state and
+    #: scored, everywhere else, by an error over the whole state -- and the three
+    #: columns here are the only ones that can reach the reward. A model whose
+    #: error falls by half on the other thirteen has not become more useful to a
+    #: policy, and something has to be able to say so
+    #: (:func:`~control.live.residual.fitted_gate`,
+    #: ``scripts/deploy_agent.py``'s error report). Real growth enters as
+    #: ``Yk``, which the stationarizing transform log-differences into the growth
+    #: rate the leg is actually built from.
+    STATES: tuple[str, ...] = ("Yk", "ER", "PI")
+
     def __init__(
         self,
         pi_target: float = 0.02,
@@ -42,6 +55,7 @@ class MandateReward(RewardFunction):
         u_scale: float = 0.02,
         g_scale: float = 0.02,
         pi_scale: float = 0.02,
+        employment_target: float = 1.0,
     ) -> None:
         """Configure the mandate's target, weights and reference scales.
 
@@ -51,6 +65,13 @@ class MandateReward(RewardFunction):
         gap is divided by before squaring -- the excursion at which a leg
         contributes ``-1`` -- so the defaults treat a 2pp employment gap, a 2pp
         shortfall from potential growth and a 2pp inflation miss as equally bad.
+
+        ``employment_target`` is the employment rate the mandate measures
+        shortfalls against, and it belongs to the *economy* rather than to the
+        mandate: GROWTH's employment rate rests at one, so full employment is the
+        right reference there, while a model with search frictions or a
+        steady-state mark-up rests below it and would otherwise be charged a
+        permanent penalty for a gap no policy can close.
         """
         self.pi_target = pi_target
         self.w_unemployment = w_unemployment
@@ -59,6 +80,7 @@ class MandateReward(RewardFunction):
         self.u_scale = u_scale
         self.g_scale = g_scale
         self.pi_scale = pi_scale
+        self.employment_target = employment_target
 
     @property
     def weights(self) -> Mapping[str, float]:
@@ -72,7 +94,7 @@ class MandateReward(RewardFunction):
     def _terms(self, ctx: RewardContext) -> dict[str, float]:
         """The three squared gaps, scaled and negated."""
         return {
-            "unemployment": -((1.0 - ctx.state.ER) / self.u_scale) ** 2,
+            "unemployment": -((self.employment_target - ctx.state.ER) / self.u_scale) ** 2,
             "growth": -(self._growth_gap(ctx) / self.g_scale) ** 2,
             "inflation": -((ctx.state.PI - self.pi_target) / self.pi_scale) ** 2,
         }

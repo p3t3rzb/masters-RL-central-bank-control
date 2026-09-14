@@ -48,7 +48,7 @@ makes the ablation of §8.2 a one-line change.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
 import numpy as np
 
@@ -312,6 +312,7 @@ class ResidualModel(Residual):
         bias_decay: float | None = None,
         noise: ResidualNoise | None = None,
         ignore: Sequence[int] | None = None,
+        gate: np.ndarray | None = None,
     ) -> None:
         """Configure the two halves of the correction.
 
@@ -348,6 +349,15 @@ class ResidualModel(Residual):
         # of column indices is usually exactly that.
         self.ignore = tuple(sorted({int(c) for c in (() if ignore is None else ignore)}))
         self.keep_: np.ndarray | None = None  # design columns actually read
+        # One shrinkage per *output*, applied when the correction is read rather
+        # than when it is fitted (see :func:`fitted_gate`). ``None`` is the
+        # un-gated model: every column trusted equally, which is what a single
+        # scalar ``tau`` amounts to.
+        self.gate = None if gate is None else np.asarray(gate, dtype=float)
+        if self.gate is not None and self.gate.shape != (n_outputs,):
+            raise ValueError(
+                f"gate is {self.gate.shape}, expected ({n_outputs},)"
+            )
 
         self.mean_: np.ndarray | None = None  # design standardisation, frozen
         self.std_: np.ndarray | None = None
@@ -454,16 +464,23 @@ class ResidualModel(Residual):
     # -- reading it -----------------------------------------------------------
 
     def correction(self, x: np.ndarray, depth: int = 0) -> np.ndarray:
-        """``g_psi(x)`` plus the bias state, decayed for a rollout's ``depth``."""
+        """``g_psi(x)`` plus the bias state, decayed for a rollout's ``depth``.
+
+        Gated per output if a gate was supplied: a column the history could not
+        show any out-of-sample skill in is handed back unchanged, which is the
+        raw proxy's own prediction for it.
+        """
         self._require_seeded()
         assert self.psi_ is not None
-        return self.psi_.T @ self._row(x) + self.bias_decay**depth * self.bias_
+        c = self.psi_.T @ self._row(x) + self.bias_decay**depth * self.bias_
+        return c if self.gate is None else self.gate * c
 
     def mean(self, x: np.ndarray) -> np.ndarray:
         """The fitted map alone, without the fast bias state."""
         self._require_seeded()
         assert self.psi_ is not None
-        return self.psi_.T @ self._row(x)
+        m = self.psi_.T @ self._row(x)
+        return m if self.gate is None else self.gate * m
 
     def variance(self, x: np.ndarray) -> np.ndarray:
         """``sigma_j^2 (x' P x)``: the epistemic variance per dimension.
@@ -525,6 +542,74 @@ class ResidualModel(Residual):
 
 
 # -- cross-fitting the historic residuals -----------------------------------
+
+
+def fitted_gate(
+    X: np.ndarray,
+    E: np.ndarray,
+    *,
+    initial: float = 0.5,
+    floor: float = 0.0,
+    verbose: bool = False,
+    **kwargs: Any,
+) -> np.ndarray:
+    """Per-output shrinkage of the correction, chosen out of sample on the history.
+
+    The correction is one estimator with one prior scale, fitted against the
+    whole state-feature row -- and that row is not a neutral target. Its columns
+    differ by orders of magnitude in how much learnable error they carry: on the
+    GROWTH history the equity price holds essentially all of the squared error
+    norm and its residual *is* predictable, while inflation and the employment
+    rate carry a thousandth of it and, at the deployment's own prior scale,
+    score **negative** out-of-fold R-squared -- the correction makes them worse.
+    A single ``tau`` cannot express that, because it is one number for sixteen
+    different questions.
+
+    So the trust is set per column, and set by the data rather than by taste.
+    Walking the seed rows prequentially -- predict each row before updating on
+    it, exactly as the live loop does -- gives one out-of-sample corrected
+    prediction per row, and the scalar that minimises squared error against it
+    is ``sum(eps * c) / sum(c * c)`` per output. Clipped into ``[floor, 1]``: a
+    negative optimum means the correction points the wrong way and the right
+    thing to do with it is nothing, and above one it would be extrapolating past
+    what it fitted.
+
+    This is the mandate's fix as much as the estimator's. Only three of the
+    sixteen columns reach the reward, so a correction that is excellent on the
+    other thirteen and wrong on those three predicts the *state* far better and
+    the *return* no better at all -- which is what a deployment landing on top of
+    its frozen reference looks like from the inside.
+
+    ``kwargs`` are :class:`ResidualModel`'s own, so the gate is fitted by the
+    same estimator it will gate. Returns a vector of length ``E.shape[1]``.
+    """
+    X = np.atleast_2d(np.asarray(X, dtype=float))
+    E = np.atleast_2d(np.asarray(E, dtype=float))
+    n, n_outputs = E.shape
+    start = max(2, int(round(initial * n)))
+    if n - start < 2:
+        raise ValueError(
+            f"{n} seed rows leave {n - start} to score a gate on; need at least 2"
+        )
+    weight = kwargs.pop("weight", 1.0)
+    model = ResidualModel(n_outputs, **kwargs).seed(
+        X[:start], E[:start], weight=weight
+    )
+    num = np.zeros(n_outputs)
+    den = np.zeros(n_outputs)
+    for x, eps in zip(X[start:], E[start:]):
+        c = model.correction(x)
+        num += eps * c
+        den += c * c
+        model.update(x, eps, weight=weight)
+    gate = np.clip(np.where(den > 0.0, num / np.maximum(den, 1e-300), 0.0), floor, 1.0)
+    if verbose:
+        print(
+            f"gate: fitted on {n - start} held-out historic rows -- "
+            f"{int(np.sum(gate < 0.05))}/{n_outputs} columns closed, "
+            f"median {np.median(gate):.2f}"
+        )
+    return gate
 
 
 def cross_fitted_residuals(

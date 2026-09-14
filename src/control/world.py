@@ -36,14 +36,15 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
-from economic_models.ground_truth import (
-    GROWTH_INTERFACE,
-    GrowthExcitationConfig,
-    GrowthRunGenerator,
+from economic_models.ground_truth.excitation.base import ExcitationConfig
+from economic_models.ground_truth.registry import (
+    DEFAULT_MODEL,
+    GroundTruthSpec,
+    ground_truth,
 )
 from economic_models.ground_truth.excitation.base import BranchCapture
 from economic_models.ground_truth.excitation.specs import ExcitationJitter
-from economic_models.ground_truth.models.growth.excitation.specs import GovSpendingSpec
+from economic_models.ground_truth.excitation.specs import SpendingResponse
 from economic_models.run import Run, Scenario
 
 #: The excitation presets a world may be built with.
@@ -58,7 +59,7 @@ class WorldConfig:
     the single run the proxy is fit on; ``horizon`` is how many steps one episode
     lasts. ``n_train_futures`` and ``n_eval_futures`` size the two disjoint banks
     of exogenous paths (the eval bank is never seen during training).
-    ``excitation`` names the :class:`~economic_models.ground_truth.GrowthExcitationConfig`
+    ``excitation`` names one of the excitation presets of :attr:`model`'s family
     preset, and ``seed`` fixes the whole draw.
 
     ``deploy_excitation`` and ``n_deploy_futures`` add a **third** bank, drawn
@@ -70,7 +71,10 @@ class WorldConfig:
     horizon: int = 50  #: steps per episode
     n_train_futures: int = 2000  #: exogenous paths available for training episodes
     n_eval_futures: int = 100  #: held-out exogenous paths, disjoint seeds
-    excitation: str = "realistic"  #: which GrowthExcitationConfig preset
+    #: which ground-truth economy the world is built on, a key of
+    #: :data:`~economic_models.ground_truth.registry.MODELS`.
+    model: str = DEFAULT_MODEL
+    excitation: str = "realistic"  #: which excitation preset of that model's family
     #: how many futures to draw for the third, *deployment* bank. Zero leaves the
     #: bank empty and a deployment falls back on the eval one, which is the
     #: original behaviour.
@@ -186,11 +190,16 @@ class WorldConfig:
             )
         )
 
-    def excitation_config(self) -> GrowthExcitationConfig:
-        """The excitation preset named by :attr:`excitation`."""
-        return getattr(GrowthExcitationConfig, self.excitation)()
+    @property
+    def spec(self) -> GroundTruthSpec:
+        """The ground-truth model this world is built on."""
+        return ground_truth(self.model)
 
-    def deploy_configs(self) -> list[GrowthExcitationConfig] | None:
+    def excitation_config(self) -> ExcitationConfig:
+        """The excitation preset named by :attr:`excitation`."""
+        return self.spec.excitation_config(self.excitation)
+
+    def deploy_configs(self) -> list[ExcitationConfig] | None:
         """One excitation config per deployment future, or ``None`` for the preset.
 
         The preset named by :attr:`deploy_excitation` (or the world's own),
@@ -200,9 +209,7 @@ class WorldConfig:
         """
         if not self.deploys_differently:
             return None
-        preset = getattr(
-            GrowthExcitationConfig, self.deploy_excitation or self.excitation
-        )()
+        preset = self.spec.excitation_config(self.deploy_excitation or self.excitation)
         if self.deploy_jitter <= 0.0:
             return [preset] * self.n_deploy_futures
         jitter = ExcitationJitter().scaled(self.deploy_jitter)
@@ -276,23 +283,22 @@ class FiscalStabilizer:
     stabilizer, which is neither the model nor the world the proxy was fit in.
     """
 
-    def __init__(self, spec: GovSpendingSpec, param_names: tuple[str, ...]) -> None:
-        """Wire the stabilizer to ``spec``'s gain and bounds.
+    def __init__(self, spec: SpendingResponse, param_names: tuple[str, ...]) -> None:
+        """Wire the stabilizer to ``spec``'s response, bounds and target parameter.
 
         ``param_names`` is the column order of a parameter row, used once to find
-        the ``GRg`` column.
+        the column the response moves. Which column that is, and how the response
+        is computed, are the spec's business -- so this works for any ground truth
+        whose excitation carries one.
         """
         self.spec = spec
-        self._grg = param_names.index("GRg")
+        self._target = param_names.index(spec.target)
 
     def apply(self, params: np.ndarray, er_prev: float) -> np.ndarray:
         """A copy of the parameter row with ``GRg`` responding to ``er_prev``."""
         stabilized = params.astype(float).copy()
-        stabilized[self._grg] = float(
-            np.clip(
-                stabilized[self._grg] + self.spec.stabilizer * (1.0 - er_prev),
-                *self.spec.bounds,
-            )
+        stabilized[self._target] = float(
+            np.clip(stabilized[self._target] + self.spec.support(er_prev), *self.spec.bounds)
         )
         return stabilized
 
@@ -311,7 +317,7 @@ class FiscalStabilizer:
         Rare and small, and the same rare and small offset in both directions.
         """
         raw = params.astype(float).copy()
-        raw[self._grg] -= self.spec.stabilizer * (1.0 - er_prev)
+        raw[self._target] -= self.spec.support(er_prev)
         return raw
 
 
@@ -469,9 +475,7 @@ def build_world(config: WorldConfig | None = None, *, verbose: bool = True) -> T
     """
     config = config or WorldConfig()
     excitation = config.excitation_config()
-    generator = GrowthRunGenerator(
-        excitation, dt=config.dt, on_collapse="truncate"
-    )
+    generator = config.spec.generator(excitation, dt=config.dt, on_collapse="truncate")
 
     n_offline = config.n_train_futures + config.n_eval_futures
     n_futures = n_offline + config.n_deploy_futures
@@ -556,7 +560,7 @@ def build_world(config: WorldConfig | None = None, *, verbose: bool = True) -> T
             futures[n_offline:], offset=n_offline, branches=terminal
         ),
         stabilizer=FiscalStabilizer(
-            excitation.gov_spending, GROWTH_INTERFACE.parameters.names()
+            excitation.gov_spending, config.spec.interface.parameters.names()
         ),
         hidden_names=excitation.hidden_names,
         config=config,

@@ -13,6 +13,8 @@ loss, the risk measure the actor optimises) reads that vector rather than a mean
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import numpy as np
 import torch
 from torch import nn
@@ -94,6 +96,60 @@ class SquashedGaussianPolicy(nn.Module):
         # log(1 - tanh(u)^2) = 2 * (log 2 - u - softplus(-2u)), stable for large |u|.
         correction = 2.0 * (np.log(2.0) - u - nn.functional.softplus(-2.0 * u))
         return (normal.log_prob(u) - correction).sum(dim=-1, keepdim=True)
+
+
+class GainCorrectedPolicy(SquashedGaussianPolicy):
+    """The offline policy, frozen, plus a small learnable reaction correction.
+
+    Online reinforcement learning from two hundred transitions is not a thing --
+    but that statement is about a *parameter count*, not about reinforcement
+    learning. The offline actor is some seventy thousand weights and cannot be
+    argued with by a few hundred samples; a linear reaction on a handful of
+    signals is a dozen, and a dozen is inside what a live run can identify.
+
+    So this is what a deployment fine-tunes instead: the frozen mean plus
+    ``G x_t + g``, where ``x_t`` are a few named observation channels -- the
+    mandate's own three, by default, since those are the only signals the reward
+    reads and therefore the only ones a reaction to can be scored. The frozen
+    body keeps its ``log_std``, so the entropy term and the temperature are
+    unchanged.
+
+    Initialised at **exactly zero**, which is the property the whole design rests
+    on: at the first update the corrected policy *is* the offline policy, the KL
+    anchor is identically zero, and the acceptance test is comparing a candidate
+    against its own starting point rather than against a differently-initialised
+    network. Every subsequent step is then a deliberate, measurable departure
+    from it, and the total departure is bounded by twelve numbers rather than by
+    a hope about optimiser step sizes.
+    """
+
+    def __init__(
+        self, base: SquashedGaussianPolicy, features: Sequence[int]
+    ) -> None:
+        """Wrap ``base``, reading observation columns ``features``.
+
+        ``base``'s parameters are frozen in place -- the caller's optimiser is
+        expected to be built over :attr:`gain` alone, and freezing here means a
+        caller that forgets still cannot move the offline policy by accident.
+        """
+        nn.Module.__init__(self)
+        if len(features) == 0:
+            raise ValueError("a gain correction needs at least one feature")
+        self.base = base
+        for parameter in self.base.parameters():
+            parameter.requires_grad_(False)
+        self.action_dim = base.action_dim
+        self.register_buffer(
+            "features", torch.as_tensor(list(features), dtype=torch.long)
+        )
+        self.gain = nn.Linear(len(features), base.action_dim)
+        nn.init.zeros_(self.gain.weight)
+        nn.init.zeros_(self.gain.bias)
+
+    def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """The frozen pre-squash mean shifted by the gain, and its own log-std."""
+        mu, log_std = self.base(obs)
+        return mu + self.gain(obs.index_select(-1, self.features)), log_std
 
 
 class QuantileCritic(nn.Module):

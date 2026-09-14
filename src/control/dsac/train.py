@@ -39,7 +39,8 @@ from economic_models.encoders import (
     NullEncoder,
     StateEncoder,
 )
-from economic_models.ground_truth import GROWTH_INTERFACE, GrowthCalibration
+from economic_models.ground_truth.registry import DEFAULT_MODEL, ground_truth
+from economic_models.interface import ModelInterface
 from economic_models.proxy import (
     BaseProxyModel,
     DRFProxy,
@@ -102,6 +103,9 @@ class TrainConfig:
     """
 
     # -- world --
+    #: which ground-truth economy to train against, a key of
+    #: :data:`~economic_models.ground_truth.registry.MODELS`.
+    model: str = DEFAULT_MODEL
     dt: float = 0.25  #: length of one step in years
     history_steps: int = 500  #: steps of the single run the proxy is fit on
     horizon: int = 50  #: steps per episode
@@ -245,6 +249,7 @@ class TrainConfig:
     def world_config(self) -> WorldConfig:
         """The :class:`~control.world.WorldConfig` this run's world is built from."""
         return WorldConfig(
+            model=self.model,
             dt=self.dt,
             history_steps=self.history_steps,
             horizon=self.world_horizon or self.horizon,
@@ -326,12 +331,16 @@ def build_encoder(
 def build_proxy(
     name: str,
     *,
+    interface: ModelInterface | None = None,
     encoder: str | StateEncoder = "kalman",
     latent: int = 10,
     seed: int = 0,
     epistemic: bool = False,
 ) -> BaseProxyModel:
-    """An unfitted proxy of family ``name`` over the GROWTH interface.
+    """An unfitted proxy of family ``name`` over ``interface``.
+
+    ``interface`` is the ground-truth model the proxy stands in for, defaulting
+    to GROWTH's so existing callers are unaffected.
 
     ``encoder`` picks the family of the conditioning latent it forecasts from and
     ``latent`` that latent's width -- a free choice, since a proxy reads its
@@ -354,6 +363,7 @@ def build_proxy(
     linear family has it in closed form, so it is ignored by the others rather
     than silently approximated.
     """
+    interface = interface or ground_truth(DEFAULT_MODEL).interface
     if name not in PROXIES:
         raise ValueError(f"proxy must be one of {PROXIES}, got {name!r}")
 
@@ -363,14 +373,14 @@ def build_proxy(
         return build_encoder(encoder, latent=latent, seed=seed, role="encoder")
 
     if name == "varx":
-        return VARXProxy(GROWTH_INTERFACE, encoder=new(), epistemic=epistemic)
+        return VARXProxy(interface, encoder=new(), epistemic=epistemic)
     if name == "drf":
-        return DRFProxy(GROWTH_INTERFACE, encoder=new(), seed=seed)
+        return DRFProxy(interface, encoder=new(), seed=seed)
     if name == "mdn":
-        return MDNProxy(GROWTH_INTERFACE, encoder=new(), seed=seed)
+        return MDNProxy(interface, encoder=new(), seed=seed)
     if name == "knn":
-        return KNNProxy(GROWTH_INTERFACE, encoder=new())
-    return RandomWalkProxy(GROWTH_INTERFACE)
+        return KNNProxy(interface, encoder=new())
+    return RandomWalkProxy(interface)
 
 
 def build_obs_encoder(
@@ -398,17 +408,21 @@ def _env(
     horizon: int | None = None,
 ) -> CentralBankEnv:
     """An environment over ``driver``, drawing from the train or eval futures."""
+    spec = world.config.spec
     episodes = world.train_futures if split == "train" else world.eval_futures
     return CentralBankEnv(
         driver,
         episodes,
         reward,
         observer,
-        GROWTH_INTERFACE,
+        spec.interface,
         EnvConfig(
             collapse_penalty=config.collapse_penalty,
             horizon=horizon or config.horizon,
             delta_rate=config.delta_rate,
+            action_bounds=spec.action_bounds,
+            er_bounds=spec.er_bounds,
+            pi_bounds=spec.pi_bounds,
         ),
         seed=seed,
     )
@@ -521,10 +535,17 @@ def taylor_policy(
     pi_target: float = 0.02,
     phi_pi: float = 0.5,
     phi_y: float = 0.5,
+    model: str = DEFAULT_MODEL,
 ) -> Policy:
     """The textbook Taylor rule on the bill rate, calibration on the other levers.
 
-    ``Rbbar = i* + (1 + phi_pi)(PI - pi_target) + phi_y * growth_gap``, where
+    ``lever = i* + (own + phi_pi)(PI - pi_target) + phi_y * growth_gap``, where the
+    lever and the response ``own`` it already owes come from the model's spec:
+    for GROWTH the lever is the bill rate and ``own`` is one, so this is the
+    textbook rule; for Smets-Wouters the lever is the *deviation* from a policy
+    rule already inside the model, and ``own`` is zero because that rule already
+    responds to inflation -- a reference there adds to what the estimated Federal
+    Reserve was doing rather than replacing it. In GROWTH's case,
     ``i*`` is the calibration bill rate -- so at target inflation and at potential
     growth the rule *is* the calibration baseline, and every difference between the
     two references is the rule reacting to the cycle. The response to inflation is
@@ -581,6 +602,7 @@ def taylor_policy(
         pi_target=pi_target,
         phi_pi=phi_pi,
         phi_y=phi_y,
+        model=model,
     )
 
 
@@ -601,16 +623,20 @@ class _TaylorRule:
         pi_target: float,
         phi_pi: float,
         phi_y: float,
+        model: str = DEFAULT_MODEL,
     ) -> None:
         """Bind the rule to an environment and resolve its feature columns."""
+        spec = ground_truth(model)
         self._env = env
         self._observer = observer
         self._dt = dt
         self._pi_target = pi_target
         self._phi_pi = phi_pi
         self._phi_y = phi_y
-        self._levels = dict(calibration_actions())
-        self._i_star = self._levels["Rbbar"]
+        self._levels = dict(calibration_actions(model))
+        self._lever = spec.reference_lever
+        self._i_star = self._levels[self._lever]
+        self._own_response = spec.reference_inflation_response
         self._pi_at, self._growth_at, self._potential_at, self._labour_at = (
             observer.index(name) for name in ("PI", "dlog(Yk)", "GRpr", "dlog(Nfe)")
         )
@@ -632,10 +658,10 @@ class _TaylorRule:
         self._gap = dt * gap + (1.0 - dt) * self._gap
         rate = (
             self._i_star
-            + (1.0 + self._phi_pi) * (raw[self._pi_at] - self._pi_target)
+            + (self._own_response + self._phi_pi) * (raw[self._pi_at] - self._pi_target)
             + self._phi_y * self._gap
         )
-        return self._env.toward({**self._levels, "Rbbar": rate})
+        return self._env.toward({**self._levels, self._lever: rate})
 
 
 def agent_policy(agent: DSACAgent, *, deterministic: bool = True) -> Policy:
@@ -643,10 +669,14 @@ def agent_policy(agent: DSACAgent, *, deterministic: bool = True) -> Policy:
     return lambda obs: agent.act(obs, deterministic=deterministic)
 
 
-def calibration_actions() -> dict[str, float]:
-    """The book's baseline policy levers, the reference a policy must beat."""
-    baselines = GrowthCalibration.baseline().baselines()
-    return {name: float(baselines[name]) for name in GROWTH_INTERFACE.actions.names()}
+def calibration_actions(model: str = DEFAULT_MODEL) -> dict[str, float]:
+    """Where ``model``'s levers rest when the bank does nothing.
+
+    The reference a policy has to beat. For GROWTH that is the book's calibrated
+    settings; for Smets-Wouters it is the zero deviation from the estimated policy
+    rule, which is to say the Federal Reserve's own estimated reaction function.
+    """
+    return ground_truth(model).baseline_actions()
 
 
 # -- evaluation -------------------------------------------------------------
@@ -842,6 +872,7 @@ def setup(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
         )
     proxy = build_proxy(
         config.proxy,
+        interface=world.config.spec.interface,
         encoder=config.encoder,
         latent=config.latent,
         seed=config.seed,
@@ -849,12 +880,14 @@ def setup(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
     )
     proxy.fit([world.history])
     observer = Observer(
-        GROWTH_INTERFACE,
+        world.config.spec.interface,
         encoder=build_obs_encoder(
             config.obs_encoder, latent=config.obs_latent, seed=config.seed
         ),
     ).fit(world.history, branches=world.start_rows)
-    reward = MandateReward(config.pi_target)
+    reward = MandateReward(
+        config.pi_target, employment_target=world.config.spec.employment_target
+    )
     if verbose:
         print(
             f"observation: {observer.dim} features "
@@ -919,11 +952,12 @@ def train(
     ref_env = build_env(copy.copy(result.proxy), result.world, observer,
                         env.reward, free_instrument(config), split="eval",
                         seed=config.seed + 1)
+    model = result.world.config.model
     references: dict[str, Policy] = {
         "random": explore,
-        "calibration": constant_policy(ref_env, calibration_actions()),
+        "calibration": constant_policy(ref_env, calibration_actions(model)),
         "taylor": taylor_policy(ref_env, observer, dt=config.dt,
-                                pi_target=config.pi_target),
+                                pi_target=config.pi_target, model=model),
     }
     result.baselines_ = {
         name: evaluate(ref_env, policy, config.eval_episodes,

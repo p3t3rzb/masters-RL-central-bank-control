@@ -30,12 +30,14 @@ base declines by default and :class:`ProxyDriver` opts in.
 
 from __future__ import annotations
 
+import inspect
+
 from abc import ABC, abstractmethod
 from typing import Any
 
 import numpy as np
 
-from economic_models.ground_truth import GrowthModel
+from economic_models.base import BaseEconomicModel
 from economic_models.proxy import BaseProxyModel, RolloutState
 from economic_models.variables import Actions, Parameters, State
 
@@ -228,7 +230,7 @@ class GroundTruthDriver(ModelDriver):
         super().__init__(world)
         self.iterations = iterations
         self.threshold = threshold
-        self.model_: GrowthModel | None = None
+        self.model_: BaseEconomicModel | None = None
 
     @property
     def required_window(self) -> int:
@@ -238,12 +240,15 @@ class GroundTruthDriver(ModelDriver):
     def _reset(
         self, branch: BranchPoint, window: tuple[np.ndarray, np.ndarray, np.ndarray]
     ) -> None:
-        """Build a fresh model and restore the branch state onto it."""
-        self.model_ = GrowthModel(
-            dt=self._world.dt,
-            iterations=self.iterations,
-            threshold=self.threshold,
-        )
+        """Build a fresh model and restore the branch state onto it.
+
+        Which model is a property of the world, so this works for any ground
+        truth whose internal state is a flat mapping restorable onto a fresh
+        instance -- the contract in
+        :class:`~economic_models.ground_truth.excitation.base.BranchCapture`.
+        Models that do not take the pysolve solver knobs simply ignore them.
+        """
+        self.model_ = _build(self._world, self.iterations, self.threshold)
         self.model_.set_values(dict(branch.state))
 
     def step(
@@ -259,3 +264,20 @@ class GroundTruthDriver(ModelDriver):
         if hidden:
             self.model_.set_values(hidden)
         return self.model_.advance(parameters, actions)
+
+
+def _build(world: TrainingWorld, iterations: int, threshold: float) -> BaseEconomicModel:
+    """A fresh ground-truth model for ``world``, at its timestep.
+
+    The pysolve models take an iteration cap and a convergence tolerance; a model
+    solved another way has no use for either, so they are offered and dropped
+    rather than demanded.
+    """
+    model = world.config.spec.model
+    accepted = inspect.signature(model.__init__).parameters
+    knobs = {
+        name: value
+        for name, value in (("iterations", iterations), ("threshold", threshold))
+        if name in accepted
+    }
+    return model(dt=world.dt, **knobs)

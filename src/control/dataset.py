@@ -28,7 +28,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from economic_models.ground_truth import GROWTH_INTERFACE, GrowthExcitationConfig
+from economic_models.ground_truth.excitation.base import ExcitationConfig
+from economic_models.ground_truth.registry import DEFAULT_MODEL, ground_truth
 from data_generation.storage import (
     branch_path,
     load_branch_state,
@@ -115,6 +116,7 @@ def load_world(
         raise ValueError(f"a world needs at least one future, asked for {futures}")
     scenarios = [load_scenario(scenario_path(root, split, index, j)) for j in range(n)]
 
+    spec = ground_truth(str(manifest["config"].get("model", DEFAULT_MODEL)))
     excitation = _excitation(manifest)
     terminal = BranchPoint(row=len(history) - 1, state=branch)
     return TrainingWorld(
@@ -123,10 +125,11 @@ def load_world(
         train_futures=EpisodeBank([]),
         eval_futures=EpisodeBank(scenarios, branches=terminal),
         stabilizer=FiscalStabilizer(
-            excitation.gov_spending, GROWTH_INTERFACE.parameters.names()
+            excitation.gov_spending, spec.interface.parameters.names()
         ),
         hidden_names=excitation.hidden_names,
         config=WorldConfig(
+            model=spec.name,
             dt=float(config["dt"]),
             history_steps=len(history),
             horizon=int(config["continuation_length"]),
@@ -147,7 +150,7 @@ def _check_split(split: str) -> None:
         raise ValueError(f"split must be one of {SPLITS}, got {split!r}")
 
 
-def _excitation(manifest: dict[str, Any]) -> GrowthExcitationConfig:
+def _excitation(manifest: dict[str, Any]) -> ExcitationConfig:
     """The excitation preset the dataset was generated under.
 
     Two things a group's ``.npz`` files do not carry come from here: the fiscal
@@ -156,8 +159,9 @@ def _excitation(manifest: dict[str, Any]) -> GrowthExcitationConfig:
     a mismatch would not fail -- it would quietly feed the solver one structural
     parameter's path under another's name.
     """
+    spec = ground_truth(str(manifest["config"].get("model", DEFAULT_MODEL)))
     name = str(manifest["config"]["excitation"])
-    excitation: GrowthExcitationConfig = getattr(GrowthExcitationConfig, name)()
+    excitation = spec.excitation_config(name)
     recorded = tuple(manifest["columns"]["hidden"])
     if excitation.hidden_names != recorded:
         raise ValueError(

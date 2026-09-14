@@ -42,6 +42,7 @@ from economic_models.ground_truth.excitation.specs import (
     CrisisSpec,
     StochasticVolatilitySpec,
 )
+from economic_models.base import ModelStepFailure
 from economic_models.run import Run, Scenario
 from economic_models.variables import Actions, Parameters, State
 
@@ -901,7 +902,7 @@ class ExcitedRunGenerator(ABC):
             try:
                 model.step()
                 return target, attempt
-            except (CalculationError, SolutionNotFoundError):
+            except (CalculationError, SolutionNotFoundError, ModelStepFailure):
                 target = {
                     name: 0.5 * (value + applied[name])
                     for name, value in target.items()

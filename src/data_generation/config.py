@@ -11,8 +11,10 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from economic_models.ground_truth.registry import DEFAULT_MODEL, ground_truth
+
 #: The excitation presets a dataset may be generated under, mapped to the
-#: :class:`~economic_models.ground_truth.GrowthExcitationConfig` classmethod that
+#: excitation classmethod of the selected model's family that
 #: builds them. ``"default"`` is the calm, full-length-guaranteed calibration;
 #: ``"realistic"`` layers volatility clustering and (recoverable) crises on top.
 EXCITATIONS = ("default", "realistic")
@@ -35,6 +37,10 @@ class DatasetConfig:
     main_length: int = 250  #: recorded steps in each main run
     continuation_length: int = 50  #: recorded steps in each continuation
     dt: float = 0.25  #: length of one step in years (1.0 annual, 1/12 monthly)
+    #: which ground-truth economy to generate from, a key of
+    #: :data:`~economic_models.ground_truth.registry.MODELS`. The default keeps
+    #: every existing dataset and figure meaning what it meant before.
+    model: str = DEFAULT_MODEL
     excitation: str = "default"  #: excitation preset, one of :data:`EXCITATIONS`
     burn_in: int = 15  #: years run unrecorded to settle each main run onto its path
     on_collapse: str = (
@@ -49,6 +55,11 @@ class DatasetConfig:
 
     def __post_init__(self) -> None:
         """Validate the configuration eagerly, before any expensive generation."""
+        spec = ground_truth(self.model)
+        if spec.fixed_dt is not None and abs(self.dt - spec.fixed_dt) > 1e-12:
+            raise ValueError(
+                f"model {self.model!r} is written for dt={spec.fixed_dt:g}, got {self.dt:g}"
+            )
         if self.excitation not in EXCITATIONS:
             raise ValueError(
                 f"excitation must be one of {EXCITATIONS}, got {self.excitation!r}"
