@@ -55,6 +55,11 @@ ACTION_BOUNDS: Mapping[str, tuple[float, float]] = {
     "ro": (0.015, 0.12),
 }
 
+#: What a model step may raise when the economy it is asked to advance has no
+#: solution -- a diverging solver, a log of a negative level. Each is an
+#: economic collapse rather than a bug, and ends the episode as one.
+_SOLVER_FAILURES = (ValueError, CalculationError, SolutionNotFoundError, RuntimeError)
+
 
 @dataclass(frozen=True)
 class EnvConfig:
@@ -450,35 +455,25 @@ class CentralBankEnv:
 
         try:
             state = self.driver.step(parameters, actions, hidden, self._rng)
-        except (
-            ValueError,
-            CalculationError,
-            SolutionNotFoundError,
-            RuntimeError,
-        ) as exc:
+        except _SOLVER_FAILURES as exc:
             return self._collapse(str(exc))
 
         levels = self.levels_of(state)
         if not self._plausible(state, levels):
             return self._collapse("state left the plausibility corridor")
 
-        ctx = RewardContext(
-            state=state,
-            prev_state=prev_state,
-            parameters=parameters,
-            prev_parameters=prev_params,
-            actions=actions,
-            prev_actions=prev_actions,
-            dt=self._world.dt,
+        reward, terms = self._score(
+            RewardContext(
+                state=state,
+                prev_state=prev_state,
+                parameters=parameters,
+                prev_parameters=prev_params,
+                actions=actions,
+                prev_actions=prev_actions,
+                dt=self._world.dt,
+            )
         )
-        terms = self.reward.terms(ctx)
-        reward = float(sum(self.reward.weights[k] * v for k, v in terms.items()))
-
-        exog_now = np.hstack(
-            [params, [getattr(actions, n) for n in self._action_names]]
-        )
-        states = np.vstack([self._states[-1], levels])
-        exog = np.vstack([self._exog[-1], exog_now])
+        states, exog = self._next_blocks(levels, params, actions)
         try:
             # Reads the episode's belief and returns a fresh one rather than
             # advancing it in place, so redrawing from this position starts from
@@ -514,6 +509,32 @@ class CentralBankEnv:
             exog=exog,
             belief=belief,
         )
+
+    def _score(self, ctx: RewardContext) -> tuple[float, dict[str, float]]:
+        """The step's scalar reward and the named terms it is the weighted sum of.
+
+        Computed from one call to :meth:`~control.rewards.base.RewardFunction.terms`
+        rather than by calling the mandate, which would compute the terms twice.
+        """
+        terms = self.reward.terms(ctx)
+        reward = float(sum(self.reward.weights[k] * v for k, v in terms.items()))
+        return reward, terms
+
+    def _next_blocks(
+        self, levels: np.ndarray, params: np.ndarray, actions: Actions
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """The trailing ``(states, exog)`` level blocks after this step's row.
+
+        The exogenous row is the parameters as applied followed by the actions,
+        which is how the levers' position is carried from one step to the next.
+        """
+        assert self._states is not None and self._exog is not None
+        exog_now = np.hstack(
+            [params, [getattr(actions, n) for n in self._action_names]]
+        )
+        states = np.vstack([self._states[-1], levels])
+        exog = np.vstack([self._exog[-1], exog_now])
+        return states, exog
 
     def _commit(self, transition: Transition) -> None:
         """Move the episode onto a drawn ``transition``: its blocks, one tick on."""
