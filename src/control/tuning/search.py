@@ -23,7 +23,7 @@ answer: the gap between the two is the size of the bias.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -138,21 +138,7 @@ def optimise(
             _record(t) for t in study.trials if t.state != optuna.trial.TrialState.FAIL
         ]
         chosen = _finalists(records, finalists)
-        if verbose:
-            print(
-                f"re-scoring {len(chosen)} finalist(s) on {len(val_fold)} held-out "
-                f"training economies"
-            )
-        for record in chosen:
-            record["validation"] = score_params(
-                policy, record["params"], val_fold, config, evaluator=evaluator
-            )
-            if verbose:
-                print(
-                    f"  {_params_str(record['params'])}  "
-                    f"search {record['loss']:.3f} -> validation "
-                    f"{record['validation']['loss']:.3f}"
-                )
+        _validate(chosen, policy, val_fold, config, evaluator, verbose=verbose)
         best = min(chosen, key=lambda r: r["validation"]["loss"])
         return TuningResult(
             policy=policy.name,
@@ -182,7 +168,7 @@ def _objective(
     evaluator: Evaluator,
     *,
     verbose: bool,
-):
+) -> Callable[[optuna.Trial], float]:
     """The trial body: walk the sequence in blocks, reporting as it goes.
 
     The running mean is reported after every block and the trial abandoned as soon
@@ -201,27 +187,71 @@ def _objective(
             result = evaluator.score(policy, prepared, block)
             returns.update(result["per_group"])
             collapses.append(result["collapse_rate"])
-            loss = -float(np.mean(list(returns.values())))
-            trial.set_user_attr("loss", loss)
-            trial.set_user_attr("groups", len(returns))
-            trial.set_user_attr("collapse_rate", float(np.mean(collapses)))
-            trial.set_user_attr("per_group", {str(k): v for k, v in returns.items()})
-            trial.report(loss, step=len(returns))
+            loss = _report(trial, returns, collapses)
             if trial.should_prune():
                 if verbose:
-                    print(
-                        f"trial {trial.number:3d}  {_params_str(params)}  "
-                        f"loss {loss:8.3f}  pruned at {len(returns)} economies"
-                    )
+                    _print_trial(trial, params, loss, f"pruned at {len(returns)}")
                 raise optuna.TrialPruned()
         if verbose:
-            print(
-                f"trial {trial.number:3d}  {_params_str(params)}  "
-                f"loss {loss:8.3f}  over {len(returns)} economies"
-            )
+            _print_trial(trial, params, loss, f"over {len(returns)}")
         return loss
 
     return objective
+
+
+def _report(
+    trial: optuna.Trial, returns: Mapping[int, float], collapses: Sequence[float]
+) -> float:
+    """Record the prefix walked so far on ``trial`` and report its loss.
+
+    The loss and its breakdown go into the trial's user attrs after every block,
+    which is what lets :func:`_record` read an honest loss off a pruned trial.
+    Returns the loss: the negative mean return over the groups in ``returns``.
+    """
+    loss = -float(np.mean(list(returns.values())))
+    trial.set_user_attr("loss", loss)
+    trial.set_user_attr("groups", len(returns))
+    trial.set_user_attr("collapse_rate", float(np.mean(collapses)))
+    trial.set_user_attr("per_group", {str(k): v for k, v in returns.items()})
+    trial.report(loss, step=len(returns))
+    return loss
+
+
+def _print_trial(
+    trial: optuna.Trial, params: Mapping[str, Any], loss: float, walked: str
+) -> None:
+    """Print one trial's progress line; ``walked`` says how far it got."""
+    print(
+        f"trial {trial.number:3d}  {_params_str(params)}  "
+        f"loss {loss:8.3f}  {walked} economies"
+    )
+
+
+def _validate(
+    chosen: Sequence[dict[str, Any]],
+    policy: TunablePolicy,
+    val_fold: Fold,
+    config: TuningConfig,
+    evaluator: Evaluator,
+    *,
+    verbose: bool,
+) -> None:
+    """Re-score every finalist on ``val_fold``, in place under ``"validation"``."""
+    if verbose:
+        print(
+            f"re-scoring {len(chosen)} finalist(s) on {len(val_fold)} held-out "
+            f"training economies"
+        )
+    for record in chosen:
+        record["validation"] = score_params(
+            policy, record["params"], val_fold, config, evaluator=evaluator
+        )
+        if verbose:
+            print(
+                f"  {_params_str(record['params'])}  "
+                f"search {record['loss']:.3f} -> validation "
+                f"{record['validation']['loss']:.3f}"
+            )
 
 
 def _record(trial: optuna.trial.FrozenTrial) -> dict[str, Any]:
