@@ -31,6 +31,10 @@ from torch import nn
 from economic_models._torch import resolve_device
 from economic_models.encoders.base import GenerativeEncoder, _StandardizedFeatures
 
+#: Residual std assigned to a feature the head fits exactly, so a stochastic
+#: forecast never draws a degenerate (zero-width) noise term for it.
+_RESID_STD_FLOOR = 1e-6
+
 
 @dataclass
 class _Belief:
@@ -43,6 +47,30 @@ class _Belief:
 
     h: np.ndarray  # (num_layers, hidden)
     c: np.ndarray  # (num_layers, hidden)
+
+
+def _pad_runs(
+    runs: list[tuple[np.ndarray, np.ndarray]], dy: int, ku: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Pad standardized ``(f, u)`` runs to one length for a single batched pass.
+
+    Returns ``(X, Y_next, U_next, mask)``: the ``(n, Tmax, dy+ku)`` LSTM inputs,
+    the ``(n, Tmax-1, .)`` next-step targets and their exog, and the
+    ``(n, Tmax-1)`` mask over each run's ``T-1`` real targets.
+    """
+    Tmax = max(len(Y) for Y, _ in runs)
+    n = len(runs)
+    X = np.zeros((n, Tmax, dy + ku), dtype=np.float32)
+    Y_next = np.zeros((n, Tmax - 1, dy), dtype=np.float32)
+    U_next = np.zeros((n, Tmax - 1, ku), dtype=np.float32)
+    mask = np.zeros((n, Tmax - 1), dtype=np.float32)
+    for i, (Y, Uc) in enumerate(runs):
+        L = len(Y)
+        X[i, :L] = np.hstack([Y, Uc])
+        Y_next[i, : L - 1] = Y[1:]
+        U_next[i, : L - 1] = Uc[1:]
+        mask[i, : L - 1] = 1.0
+    return X, Y_next, U_next, mask
 
 
 class _PredictiveLSTM(nn.Module):
@@ -177,40 +205,32 @@ class LSTMEncoder(_StandardizedFeatures, GenerativeEncoder):
         runs = [(self._sy(F), self._su(U)) for F, U in feature_runs if len(F) >= 2]
         if not runs:
             raise ValueError("LSTMEncoder.fit needs at least one run of length >= 2")
-
-        # Pad the standardized (f, u) sequences to a common length and build a mask
-        # over the T-1 next-step targets of each run.
-        lengths = np.array([len(Y) for Y, _ in runs])
-        Tmax = int(lengths.max())
-        n = len(runs)
-        X = np.zeros((n, Tmax, dy + ku), dtype=np.float32)
-        Ytgt = np.zeros((n, Tmax - 1, dy), dtype=np.float32)
-        Unext = np.zeros((n, Tmax - 1, ku), dtype=np.float32)
-        mask = np.zeros((n, Tmax - 1), dtype=np.float32)
-        for i, (Y, Uc) in enumerate(runs):
-            L = len(Y)
-            X[i, :L] = np.hstack([Y, Uc])
-            Ytgt[i, : L - 1] = Y[1:]
-            Unext[i, : L - 1] = Uc[1:]
-            mask[i, : L - 1] = 1.0
-
-        Xt, Ytt = self._t(X), self._t(Ytgt)
-        Unt, mt = self._t(Unext), self._t(mask)
+        X, Y_next, U_next, mask = _pad_runs(runs, dy, ku)
+        Xt, Unt = self._t(X), self._t(U_next)
 
         self.net_ = _PredictiveLSTM(
             dy, ku, self._m, self.num_layers, self.head_hidden, self.dropout
         ).to(self.device)
+        self._train(Xt, self._t(Y_next), Unt, self._t(mask))
+        self._record_resid_std(Xt, Unt, Y_next, mask)
+        self._fitted = True
+        return self
+
+    def _train(
+        self, Xt: torch.Tensor, Yt: torch.Tensor, Unt: torch.Tensor, mt: torch.Tensor
+    ) -> None:
+        """Full-batch Adam on the masked next-step squared error, per epoch."""
+        assert self.net_ is not None
         opt = torch.optim.Adam(
             self.net_.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
-
         self.loss_ = []
         self.net_.train()
         for _ in range(self.epochs):
             opt.zero_grad()
             H, _ = self.net_.encode(Xt)  # (n, Tmax, m)
             pred = self.net_.read(H[:, :-1, :], Unt)  # (n, Tmax-1, dy)
-            sq = ((pred - Ytt) ** 2).sum(dim=-1) * mt
+            sq = ((pred - Yt) ** 2).sum(dim=-1) * mt
             loss = sq.sum() / mt.sum()
             loss.backward()
             if self.grad_clip is not None:
@@ -218,17 +238,19 @@ class LSTMEncoder(_StandardizedFeatures, GenerativeEncoder):
             opt.step()
             self.loss_.append(float(loss.detach()))
 
-        # Record per-feature predictive residual std for stochastic forecasts.
+    def _record_resid_std(
+        self, Xt: torch.Tensor, Unt: torch.Tensor, Y_next: np.ndarray, mask: np.ndarray
+    ) -> None:
+        """Record the per-feature predictive residual std for stochastic forecasts."""
+        assert self.net_ is not None
         self.net_.eval()
         with torch.no_grad():
             H, _ = self.net_.encode(Xt)
             fitted = self.net_.read(H[:, :-1, :], Unt).cpu().numpy()
-        m3 = mask[:, :, None].astype(bool)
-        resid = (Ytgt - fitted)[np.broadcast_to(m3, Ytgt.shape)].reshape(-1, dy)
+        observed = np.broadcast_to(mask[:, :, None].astype(bool), Y_next.shape)
+        resid = (Y_next - fitted)[observed].reshape(-1, Y_next.shape[-1])
         self._resid_std = resid.std(axis=0)
-        self._resid_std[self._resid_std == 0] = 1e-6
-        self._fitted = True
-        return self
+        self._resid_std[self._resid_std == 0] = _RESID_STD_FLOOR
 
     # -- batch encode -------------------------------------------------------
 
