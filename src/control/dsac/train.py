@@ -97,6 +97,9 @@ __all__ = [
     "rollout",
 ]
 
+#: Finished training episodes a progress line averages the training return over.
+_RECENT_EPISODES = 20
+
 
 @dataclass
 class TrainingResult:
@@ -154,36 +157,11 @@ def setup(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
         torch.set_num_threads(config.threads)
 
     world = build_world(config.world_config(), verbose=verbose)
-
-    if verbose:
-        print(
-            f"proxy: fitting {config.proxy} ({config.encoder} encoder, "
-            f"latent {config.latent}) on {len(world.history)} steps..."
-        )
-    proxy = build_proxy(
-        config.proxy,
-        interface=world.config.spec.interface,
-        encoder=config.encoder,
-        latent=config.latent,
-        seed=config.seed,
-        epistemic=config.epistemic,
-    )
-    proxy.fit([world.history])
-    observer = Observer(
-        world.config.spec.interface,
-        encoder=build_obs_encoder(
-            config.obs_encoder, latent=config.obs_latent, seed=config.seed
-        ),
-    ).fit(world.history, branches=world.start_rows)
+    proxy = _fit_proxy(world, config, verbose=verbose)
+    observer = _fit_observer(world, config, verbose=verbose)
     reward = MandateReward(
         config.pi_target, employment_target=world.config.spec.employment_target
     )
-    if verbose:
-        print(
-            f"observation: {observer.dim} features "
-            f"({config.obs_encoder} encoder, "
-            f"latent {observer.encoder.latent_dim})"
-        )
 
     env = build_env(
         proxy, world, observer, reward, config, split="train", seed=config.seed
@@ -199,8 +177,65 @@ def setup(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
         split="eval",
         seed=config.seed + 1,
     )
+    agent = _build_agent(env, config)
+    return TrainingResult(
+        agent=agent,
+        world=world,
+        proxy=proxy,
+        observer=observer,
+        env=env,
+        eval_env=eval_env,
+        config=config,
+    )
 
-    agent = DSACAgent(
+
+def _fit_proxy(
+    world: TrainingWorld, config: TrainConfig, *, verbose: bool
+) -> BaseProxyModel:
+    """The run's world model, fitted on ``world``'s history."""
+    if verbose:
+        print(
+            f"proxy: fitting {config.proxy} ({config.encoder} encoder, "
+            f"latent {config.latent}) on {len(world.history)} steps..."
+        )
+    proxy = build_proxy(
+        config.proxy,
+        interface=world.config.spec.interface,
+        encoder=config.encoder,
+        latent=config.latent,
+        seed=config.seed,
+        epistemic=config.epistemic,
+    )
+    proxy.fit([world.history])
+    return proxy
+
+
+def _fit_observer(
+    world: TrainingWorld, config: TrainConfig, *, verbose: bool
+) -> Observer:
+    """The policy's observation, fitted and frozen on ``world``'s history.
+
+    Its episode-start beliefs are filtered for every row a training episode may
+    branch from (:attr:`~control.world.TrainingWorld.start_rows`).
+    """
+    observer = Observer(
+        world.config.spec.interface,
+        encoder=build_obs_encoder(
+            config.obs_encoder, latent=config.obs_latent, seed=config.seed
+        ),
+    ).fit(world.history, branches=world.start_rows)
+    if verbose:
+        print(
+            f"observation: {observer.dim} features "
+            f"({config.obs_encoder} encoder, "
+            f"latent {observer.encoder.latent_dim})"
+        )
+    return observer
+
+
+def _build_agent(env: CentralBankEnv, config: TrainConfig) -> DSACAgent:
+    """An untrained agent sized to ``env`` and configured by ``config``."""
+    return DSACAgent(
         env.obs_dim,
         env.action_dim,
         n_quantiles=config.n_quantiles,
@@ -212,15 +247,6 @@ def setup(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
         risk=config.risk_measure(),
         seed=config.seed,
         device=config.device,
-    )
-    return TrainingResult(
-        agent=agent,
-        world=world,
-        proxy=proxy,
-        observer=observer,
-        env=env,
-        eval_env=eval_env,
-        config=config,
     )
 
 
@@ -321,11 +347,11 @@ def _train_loop(
             result.updates_.append({"step": step, **stats})
 
         if step % config.eval_every == 0 or step == config.total_steps:
-            clone = _checkpoint(result, config, agent, step, stats, verbose=verbose)
-            if clone is not None:
-                best_agent = clone
-            # The evaluation ran on a copy, but the training environment's own
+            # The evaluation runs on a copy, but the training environment's own
             # episode is mid-flight; leave it running.
+            best_agent = _checkpoint(
+                result, config, agent, step, stats, best_agent, verbose=verbose
+            )
     return best_agent
 
 
@@ -468,13 +494,16 @@ def _checkpoint(
     agent: DSACAgent,
     step: int,
     stats: Mapping[str, float],
+    best_agent: DSACAgent | None,
     *,
     verbose: bool,
 ) -> DSACAgent | None:
     """Score ``agent`` on the held-out futures at ``step`` and log the sweep.
 
-    Returns a clone of ``agent`` when it is the best-scoring checkpoint so far
-    and :attr:`~control.dsac.config.TrainConfig.restore_best` is set, otherwise ``None``.
+    Returns the best checkpoint after this sweep: a clone of ``agent`` when it
+    beats every earlier one and
+    :attr:`~control.dsac.config.TrainConfig.restore_best` is set, otherwise the
+    ``best_agent`` it was handed.
     """
     scores = evaluate(
         result.eval_env,
@@ -483,23 +512,36 @@ def _checkpoint(
         repeats=config.eval_repeats,
     )
     result.evals_.append({"step": step, **scores})
-    best_agent = None
-    if config.restore_best and (
-        not result.best_ or scores["return"] > result.best_["return"]
-    ):
+    if config.restore_best and _is_new_best(result, scores):
         result.best_ = {"step": float(step), "return": scores["return"]}
         best_agent = agent.clone()
     if verbose:
-        recent = result.episodes_[-20:]
-        train_return = np.mean([e["return"] for e in recent]) if recent else np.nan
-        print(
-            f"  [{step:>7}/{config.total_steps}] "
-            f"train {train_return:9.1f} | eval {scores['return']:9.1f} "
-            f"+- {scores['return_std']:7.1f} | "
-            f"collapse {scores['collapse_rate']:.0%} | "
-            f"alpha {stats.get('alpha', float('nan')):.3f}"
-        )
+        _print_checkpoint(result, config, step, scores, stats)
     return best_agent
+
+
+def _is_new_best(result: TrainingResult, scores: Mapping[str, float]) -> bool:
+    """Whether ``scores`` beats every evaluation sweep kept so far."""
+    return not result.best_ or scores["return"] > result.best_["return"]
+
+
+def _print_checkpoint(
+    result: TrainingResult,
+    config: TrainConfig,
+    step: int,
+    scores: Mapping[str, float],
+    stats: Mapping[str, float],
+) -> None:
+    """Print one progress line: recent training return beside the held-out score."""
+    recent = result.episodes_[-_RECENT_EPISODES:]
+    train_return = np.mean([e["return"] for e in recent]) if recent else np.nan
+    print(
+        f"  [{step:>7}/{config.total_steps}] "
+        f"train {train_return:9.1f} | eval {scores['return']:9.1f} "
+        f"+- {scores['return_std']:7.1f} | "
+        f"collapse {scores['collapse_rate']:.0%} | "
+        f"alpha {stats.get('alpha', float('nan')):.3f}"
+    )
 
 
 def _final_scoring(
