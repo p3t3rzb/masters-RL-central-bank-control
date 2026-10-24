@@ -178,6 +178,7 @@ def _objective(
     """
 
     def objective(trial: optuna.Trial) -> float:
+        """Score one suggested candidate block by block; its loss over the walk."""
         params = policy.space.suggest(trial)
         prepared = policy.prepare(params, fold, config)
         returns: dict[int, float] = {}

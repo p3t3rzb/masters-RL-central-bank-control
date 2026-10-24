@@ -115,14 +115,12 @@ class DSACAgent:
         self.actor = SquashedGaussianPolicy(obs_dim, action_dim, hidden, n_layers).to(
             self.device
         )
-        self.critics = nn.ModuleList(
-            QuantileCritic(obs_dim, action_dim, n_quantiles, hidden, n_layers)
-            for _ in range(2)
-        ).to(self.device)
-        self.targets = nn.ModuleList(
-            QuantileCritic(obs_dim, action_dim, n_quantiles, hidden, n_layers)
-            for _ in range(2)
-        ).to(self.device)
+        self.critics = self._twin_critics(
+            obs_dim, action_dim, n_quantiles, hidden, n_layers
+        )
+        self.targets = self._twin_critics(
+            obs_dim, action_dim, n_quantiles, hidden, n_layers
+        )
         self.targets.load_state_dict(self.critics.state_dict())
         for p in self.targets.parameters():
             p.requires_grad_(False)
@@ -139,6 +137,20 @@ class DSACAgent:
             (torch.arange(n_quantiles, device=self.device, dtype=torch.float32) + 0.5)
             / n_quantiles
         ).view(1, -1, 1)
+
+    def _twin_critics(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        n_quantiles: int,
+        hidden: int,
+        n_layers: int,
+    ) -> nn.ModuleList:
+        """Two independently initialised quantile critics, on this agent's device."""
+        return nn.ModuleList(
+            QuantileCritic(obs_dim, action_dim, n_quantiles, hidden, n_layers)
+            for _ in range(2)
+        ).to(self.device)
 
     # -- acting --------------------------------------------------------------
 

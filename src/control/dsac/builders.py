@@ -117,19 +117,20 @@ def build_proxy(
     if name not in PROXIES:
         raise ValueError(f"proxy must be one of {PROXIES}, got {name!r}")
 
-    def new() -> StateEncoder:
+    def fresh_encoder() -> StateEncoder:
+        """This proxy's own encoder: a copy of a built one, or a new one by name."""
         if isinstance(encoder, StateEncoder):
             return copy.deepcopy(encoder)
         return build_encoder(encoder, latent=latent, seed=seed, role="encoder")
 
     if name == "varx":
-        return VARXProxy(interface, encoder=new(), epistemic=epistemic)
+        return VARXProxy(interface, encoder=fresh_encoder(), epistemic=epistemic)
     if name == "drf":
-        return DRFProxy(interface, encoder=new(), seed=seed)
+        return DRFProxy(interface, encoder=fresh_encoder(), seed=seed)
     if name == "mdn":
-        return MDNProxy(interface, encoder=new(), seed=seed)
+        return MDNProxy(interface, encoder=fresh_encoder(), seed=seed)
     if name == "knn":
-        return KNNProxy(interface, encoder=new())
+        return KNNProxy(interface, encoder=fresh_encoder())
     return RandomWalkProxy(interface)
 
 
