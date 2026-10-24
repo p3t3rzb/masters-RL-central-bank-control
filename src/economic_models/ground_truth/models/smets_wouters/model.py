@@ -155,12 +155,19 @@ class SwModel(LinearREEconomicModel):
         self._y_previous = np.zeros(len(VARIABLES))
         self._state = self._observe()
         self._solutions.append(self._record())
+        self._apply_overrides(param_overrides)
 
-        if param_overrides:
-            unknown = set(param_overrides) - self._exogenous_names()
-            if unknown:
-                raise ValueError(f"not visible parameters: {sorted(unknown)}")
-            self._exogenous.update({k: float(v) for k, v in param_overrides.items()})
+    def _apply_overrides(self, overrides: Mapping[str, float]) -> None:
+        """Set constructor ``overrides`` on the visible exogenous inputs.
+
+        Applied after seeding, so an override always wins over the calibration,
+        and restricted to visible names, so a typo raises instead of silently
+        creating an input nothing reads.
+        """
+        unknown = set(overrides) - self._exogenous_names()
+        if unknown:
+            raise ValueError(f"not visible parameters: {sorted(unknown)}")
+        self._exogenous.update({k: float(v) for k, v in overrides.items()})
 
     # -- the visible interface ---------------------------------------------
 
