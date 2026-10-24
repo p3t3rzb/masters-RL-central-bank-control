@@ -25,7 +25,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from economic_models.ground_truth.excitation.base import ExcitationConfig
+from economic_models.ground_truth.excitation.process import ExcitationConfig
 from economic_models.ground_truth.excitation.specs import (
     AR1Spec,
     ClimateSpec,

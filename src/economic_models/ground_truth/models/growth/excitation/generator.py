@@ -5,7 +5,7 @@ top of the model-agnostic drift/volatility/crisis machinery: government spending
 growth ``GRg`` (a bounded gap to productivity growth plus a countercyclical
 response to the previous step's employment gap) and the full-employment level
 ``Nfe`` (a log random walk). :class:`GrowthRunGenerator` wires the base
-:class:`~economic_models.ground_truth.excitation.base.ExcitedRunGenerator` to the
+:class:`~economic_models.ground_truth.excitation.generator.ExcitedRunGenerator` to the
 GROWTH model, calibration and interface.
 
 The policy rate carries no feedback rule, only tightly clipped noise: in this
@@ -21,11 +21,11 @@ from typing import Any
 
 import numpy as np
 
-from economic_models.ground_truth.excitation.base import (
+from economic_models.ground_truth.excitation.generator import (
     DrivenModel,
-    ExcitationProcess,
     ExcitedRunGenerator,
 )
+from economic_models.ground_truth.excitation.process import ExcitationProcess
 from economic_models.ground_truth.models.growth.calibration import GrowthCalibration
 from economic_models.ground_truth.models.growth.excitation.presets import (
     GrowthExcitationConfig,

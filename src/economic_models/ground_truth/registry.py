@@ -23,7 +23,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from economic_models.ground_truth.excitation.base import ExcitedRunGenerator
+from economic_models.ground_truth.excitation.generator import ExcitedRunGenerator
 from economic_models.ground_truth.models.growth import (
     GROWTH_INTERFACE,
     GrowthCalibration,

@@ -2,7 +2,7 @@
 
 A config bundles the model-agnostic per-input drift specs (visible and hidden)
 plus the optional volatility/crisis/climate layers (all inherited from
-:class:`~economic_models.ground_truth.excitation.base.ExcitationConfig`) and
+:class:`~economic_models.ground_truth.excitation.process.ExcitationConfig`) and
 GROWTH's own special inputs: the government-spending stabilizer and the ``Nfe``
 random walk. :meth:`GrowthExcitationConfig.default` is the calm calibration the
 training datasets were generated with; :meth:`GrowthExcitationConfig.realistic`
@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from economic_models.ground_truth.excitation.base import ExcitationConfig
+from economic_models.ground_truth.excitation.process import ExcitationConfig
 from economic_models.ground_truth.excitation.specs import (
     AR1Spec,
     ClimateSpec,

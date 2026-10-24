@@ -7,7 +7,7 @@ exogenous spending, which leans against the employment shortfall, and the labour
 force and energy prices, which are random walks in levels rather than deviations.
 
 :class:`SwRunGenerator` is the model-specific end of the shared machinery in
-:mod:`economic_models.ground_truth.excitation.base`: it builds the model, makes
+:mod:`economic_models.ground_truth.excitation.generator`: it builds the model, makes
 the process, and says what feedback the process reads off the last period.
 
 The one addition GROWTH does not need is the redraw at the top of
@@ -27,11 +27,11 @@ from typing import Any
 
 import numpy as np
 
-from economic_models.ground_truth.excitation.base import (
+from economic_models.ground_truth.excitation.generator import (
     DrivenModel,
-    ExcitationProcess,
     ExcitedRunGenerator,
 )
+from economic_models.ground_truth.excitation.process import ExcitationProcess
 from economic_models.ground_truth.models.smets_wouters.calibration import SwCalibration
 from economic_models.ground_truth.models.smets_wouters.excitation.presets import (
     SwExcitationConfig,
