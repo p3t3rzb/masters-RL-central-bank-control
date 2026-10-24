@@ -18,7 +18,7 @@ uv.lock
 
 papers/
 
-scripts/
+private/
 
 docs/
 
@@ -26,3 +26,5 @@ docs/
 data/
 
 runs/
+
+CLAUDE.md
