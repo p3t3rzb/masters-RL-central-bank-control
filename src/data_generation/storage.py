@@ -30,10 +30,52 @@ from economic_models.run import Run, Scenario
 #: Sentinel stored for an absent ``seed`` (``None``) in the integer metadata.
 _NO_SEED = -1
 
+#: The arrays a :class:`Run` / :class:`Scenario` may or may not carry, stored only
+#: when present (in this order) and read back as ``None`` when absent.
+_OPTIONAL_ARRAYS = ("hidden", "volatility", "crisis_intensity")
+
 
 def _pack_meta(meta: dict[str, Any]) -> np.ndarray:
     """A JSON metadata block as a 0-d array (``np.savez`` can't store None/scalars)."""
     return np.asarray(json.dumps(meta))
+
+
+def _prepare(path: str | Path) -> Path:
+    """``path`` as a :class:`Path`, with its parent directory created."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _optional_arrays(record: Run | Scenario) -> dict[str, np.ndarray]:
+    """The :data:`_OPTIONAL_ARRAYS` ``record`` actually carries, keyed by name."""
+    present = {name: getattr(record, name) for name in _OPTIONAL_ARRAYS}
+    return {name: array for name, array in present.items() if array is not None}
+
+
+def _load_optional(data: Any, name: str) -> np.ndarray | None:
+    """Array ``name`` from an open ``.npz``, or ``None`` if it was not stored."""
+    return data[name] if name in data else None
+
+
+def _encode_seed(seed: int | None) -> int:
+    """A seed as stored in the metadata (:data:`_NO_SEED` for ``None``)."""
+    return _NO_SEED if seed is None else int(seed)
+
+
+def _decode_seed(stored: int) -> int | None:
+    """The inverse of :func:`_encode_seed`."""
+    return None if stored == _NO_SEED else int(stored)
+
+
+def _encode_climate(climate: float | None) -> float:
+    """A climate as stored in the metadata (``nan`` for ``None``)."""
+    return np.nan if climate is None else float(climate)
+
+
+def _decode_climate(stored: float) -> float | None:
+    """The inverse of :func:`_encode_climate`."""
+    return None if np.isnan(stored) else float(stored)
 
 
 def save_run(path: str | Path, run: Run) -> None:
@@ -44,27 +86,19 @@ def save_run(path: str | Path, run: Run) -> None:
     when present, and the scalar metadata (dt, seed, dampened steps, climate,
     collapse flag) travels in a small side block so the run reconstructs exactly.
     """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
+    path = _prepare(path)
     arrays: dict[str, np.ndarray] = {
         "states": run.states,
         "params": run.params,
         "actions": run.actions,
+        **_optional_arrays(run),
     }
-    if run.hidden is not None:
-        arrays["hidden"] = run.hidden
-    if run.volatility is not None:
-        arrays["volatility"] = run.volatility
-    if run.crisis_intensity is not None:
-        arrays["crisis_intensity"] = run.crisis_intensity
-
     arrays["_meta"] = _pack_meta(
         {
             "dt": float(run.dt),
-            "seed": _NO_SEED if run.seed is None else int(run.seed),
+            "seed": _encode_seed(run.seed),
             "dampened_steps": int(run.dampened_steps),
-            "climate": np.nan if run.climate is None else float(run.climate),
+            "climate": _encode_climate(run.climate),
             "collapsed": bool(run.collapsed),
         }
     )
@@ -79,15 +113,13 @@ def load_run(path: str | Path) -> Run:
             states=data["states"],
             params=data["params"],
             actions=data["actions"],
-            hidden=data["hidden"] if "hidden" in data else None,
+            hidden=_load_optional(data, "hidden"),
             dt=float(meta["dt"]),
-            seed=None if meta["seed"] == _NO_SEED else int(meta["seed"]),
+            seed=_decode_seed(meta["seed"]),
             dampened_steps=int(meta["dampened_steps"]),
-            volatility=data["volatility"] if "volatility" in data else None,
-            crisis_intensity=(
-                data["crisis_intensity"] if "crisis_intensity" in data else None
-            ),
-            climate=None if np.isnan(meta["climate"]) else float(meta["climate"]),
+            volatility=_load_optional(data, "volatility"),
+            crisis_intensity=_load_optional(data, "crisis_intensity"),
+            climate=_decode_climate(meta["climate"]),
             collapsed=bool(meta["collapsed"]),
         )
 
@@ -99,22 +131,16 @@ def save_scenario(path: str | Path, scenario: Scenario) -> None:
     actions, since a scenario fixes neither -- the agent supplies the actions and
     the model then produces the states.
     """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    arrays: dict[str, np.ndarray] = {"params": scenario.params}
-    if scenario.hidden is not None:
-        arrays["hidden"] = scenario.hidden
-    if scenario.volatility is not None:
-        arrays["volatility"] = scenario.volatility
-    if scenario.crisis_intensity is not None:
-        arrays["crisis_intensity"] = scenario.crisis_intensity
-
+    path = _prepare(path)
+    arrays: dict[str, np.ndarray] = {
+        "params": scenario.params,
+        **_optional_arrays(scenario),
+    }
     arrays["_meta"] = _pack_meta(
         {
             "dt": float(scenario.dt),
-            "seed": _NO_SEED if scenario.seed is None else int(scenario.seed),
-            "climate": np.nan if scenario.climate is None else float(scenario.climate),
+            "seed": _encode_seed(scenario.seed),
+            "climate": _encode_climate(scenario.climate),
         }
     )
     np.savez_compressed(path, allow_pickle=False, **arrays)
@@ -126,14 +152,12 @@ def load_scenario(path: str | Path) -> Scenario:
         meta = json.loads(str(data["_meta"]))
         return Scenario(
             params=data["params"],
-            hidden=data["hidden"] if "hidden" in data else None,
+            hidden=_load_optional(data, "hidden"),
             dt=float(meta["dt"]),
-            seed=None if meta["seed"] == _NO_SEED else int(meta["seed"]),
-            volatility=data["volatility"] if "volatility" in data else None,
-            crisis_intensity=(
-                data["crisis_intensity"] if "crisis_intensity" in data else None
-            ),
-            climate=None if np.isnan(meta["climate"]) else float(meta["climate"]),
+            seed=_decode_seed(meta["seed"]),
+            volatility=_load_optional(data, "volatility"),
+            crisis_intensity=_load_optional(data, "crisis_intensity"),
+            climate=_decode_climate(meta["climate"]),
         )
 
 
@@ -144,8 +168,7 @@ def save_branch_state(path: str | Path, state: dict[str, float]) -> None:
     continuation scenario can be rolled out from exactly there; it holds every
     model variable (visible and hidden), not just the visible interface.
     """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path = _prepare(path)
     names = np.asarray(list(state.keys()))
     values = np.asarray(list(state.values()), dtype=float)
     np.savez_compressed(path, names=names, values=values)
