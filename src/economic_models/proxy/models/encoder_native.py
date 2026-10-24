@@ -72,7 +72,7 @@ class EncoderNativeProxy(BaseProxyModel):
     def _predict_step(
         self, ctx: StepContext, rng: np.random.Generator | None
     ) -> np.ndarray:
-        """Forecast the next row directly from the encoder belief (deterministic or stochastic)."""
+        """Forecast the next row from the encoder belief, a draw if ``rng`` is given."""
         # Overrides the base template deliberately: the native step forecasts
         # from the *belief itself* (``encoder.forecast``) for both the
         # deterministic and stochastic paths, rather than routing the

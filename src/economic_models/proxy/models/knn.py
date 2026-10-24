@@ -64,7 +64,7 @@ class KNNProxy(BaseProxyModel):
     # -- estimation ----------------------------------------------------------
 
     def _fit(self, data: FitData) -> None:
-        """Fit the standardizer and index the standardized training designs for neighbour lookup."""
+        """Fit the standardizer and index the standardized designs for lookup."""
         X = self._design(data.z, data.u_next)
         Y = data.y
 

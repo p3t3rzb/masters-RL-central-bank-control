@@ -54,7 +54,7 @@ class RandomWalkProxy(BaseProxyModel):
     # -- estimation ----------------------------------------------------------
 
     def _fit(self, data: FitData) -> None:
-        """Estimate the one-step feature-change covariance and its Cholesky factor for stochastic draws."""
+        """Estimate the one-step feature-change covariance and its Cholesky factor."""
         # ``y - f_prev`` are exactly the within-run one-step feature changes.
         changes = data.y - data.f_prev
         self.change_cov_ = np.cov(changes.T)

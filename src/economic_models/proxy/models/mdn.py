@@ -266,7 +266,7 @@ class MDNProxy(BaseProxyModel):
     def _predict_batch(
         self, z: np.ndarray, u_next: np.ndarray, f_prev: np.ndarray
     ) -> np.ndarray:
-        """Conditional mean ``sum_k pi_k mu_k`` of the predicted mixture, in level-feature space."""
+        """Conditional mean ``sum_k pi_k mu_k`` of the mixture, in feature space."""
         pi, mu, _ = self._mixture_batch(self._design(z, u_next))
         mean = np.einsum("nk,nkd->nd", pi, mu)  # conditional mean sum_k pi_k mu_k
         assert self._y_scaler is not None
