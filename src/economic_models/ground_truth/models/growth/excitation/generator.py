@@ -17,6 +17,7 @@ keeps the economy inside its stable corridor around full employment.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
@@ -78,9 +79,8 @@ class GrowthExcitationProcess(ExcitationProcess):
             sigma_scale=self.vol_multiplier,
             dt=self._dt,
         )
-        stabilizer = gov.stabilizer * (1.0 - er_prev)
         values["GRg"] = float(
-            np.clip(values["GRpr"] + self._grg_gap + stabilizer, *gov.bounds)
+            np.clip(values["GRpr"] + self._grg_gap + gov.support(er_prev), *gov.bounds)
         )
 
         self._log_nfe_dev = self._config.nfe.advance(
@@ -134,7 +134,7 @@ class GrowthRunGenerator(ExcitedRunGenerator):
             on_collapse=on_collapse,
         )
 
-    def _model_baselines(self):
+    def _model_baselines(self) -> Mapping[str, float]:
         """Every structural and exogenous parameter of the calibration."""
         return self.calibration.baselines()
 
