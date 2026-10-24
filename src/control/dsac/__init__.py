@@ -10,33 +10,36 @@
 * :mod:`~control.dsac.networks` / :mod:`~control.dsac.replay` -- the squashed
   Gaussian policy, the quantile critic, and the transition buffer.
 * :mod:`~control.dsac.train` -- :func:`~control.dsac.train.train`, which builds
-  the world, fits the proxy, and runs the loop, plus the evaluation helpers and
-  the reference policies a learned one must beat.
+  the world, fits the proxy, and runs the loop, configured by
+  :class:`~control.dsac.config.TrainConfig` and assembled by
+  :mod:`~control.dsac.builders`.
+* :mod:`~control.dsac.policies` / :mod:`~control.dsac.evaluation` -- the
+  reference policies a learned one must beat, and the paired scoring that says
+  whether it did.
 """
 
 from control.dsac.agent import DSACAgent
-from control.dsac.networks import QuantileCritic, SquashedGaussianPolicy
-from control.dsac.replay import Batch, ReplayBuffer
-from control.dsac.risk import CVaRRisk, MeanRisk, RiskMeasure
-from control.dsac.train import (
+from control.dsac.builders import (
     ENCODERS,
     PROXIES,
-    TrainConfig,
-    TrainingResult,
     build_encoder,
     build_env,
     build_obs_encoder,
     build_proxy,
+)
+from control.dsac.config import TrainConfig
+from control.dsac.evaluation import evaluate, rollout
+from control.dsac.networks import QuantileCritic, SquashedGaussianPolicy
+from control.dsac.policies import (
     calibration_actions,
     constant_policy,
-    evaluate,
     random_policy,
     reset_policy,
-    rollout,
-    setup,
     taylor_policy,
-    train,
 )
+from control.dsac.replay import Batch, ReplayBuffer
+from control.dsac.risk import CVaRRisk, MeanRisk, RiskMeasure
+from control.dsac.train import TrainingResult, setup, train
 
 __all__ = [
     "DSACAgent",

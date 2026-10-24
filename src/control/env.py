@@ -93,7 +93,7 @@ class EnvConfig:
     stated in *levels* (the Taylor rule, a constant baseline) drives an
     instrument of this kind through :meth:`CentralBankEnv.toward` -- though the
     references are deliberately scored under a
-    :func:`~control.dsac.train.free_instrument` configuration, fast enough not
+    :func:`~control.dsac.policies.free_instrument` configuration, fast enough not
     to constrain them: the speed is the agent's problem, and the textbook rules
     are compared unmodified.
 
@@ -103,7 +103,7 @@ class EnvConfig:
     statement at every ``dt``. At 0.1 per step a lever crosses 40% of its box a
     year at quarterly and 120% at monthly, so a number tuned at one frequency
     silently means something else at another -- the same trap
-    :func:`~control.dsac.train.taylor_policy` documents for its own gain. Stated
+    :func:`~control.dsac.policies.taylor_policy` documents for its own gain. Stated
     per year it means one thing everywhere, and the environment converts.
 
     It costs no extra episode state: the position being integrated from is
