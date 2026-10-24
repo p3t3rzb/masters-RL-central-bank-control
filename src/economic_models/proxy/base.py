@@ -97,6 +97,11 @@ class RolloutState:
     n_solutions: int
 
 
+def _copy_or_none(array: np.ndarray | None) -> np.ndarray | None:
+    """A defensive copy of a rollout buffer that may not be populated yet."""
+    return None if array is None else array.copy()
+
+
 class BaseProxyModel(BaseEconomicModel):
     """A learned surrogate fit on ground-truth runs, in a transform's feature space.
 
@@ -199,11 +204,10 @@ class BaseProxyModel(BaseEconomicModel):
         Subclasses normally override neither (the encoder-native proxy is the
         exception -- it forecasts from the belief itself).
         """
-        if rng is None:
-            return self._predict_batch(ctx.z[None], ctx.u_next[None], ctx.f_prev[None])[
-                0
-            ]
-        return self._sample_step(ctx, rng)
+        if rng is not None:
+            return self._sample_step(ctx, rng)
+        batch = self._predict_batch(ctx.z[None], ctx.u_next[None], ctx.f_prev[None])
+        return batch[0]
 
     # -- the estimator, addressable from outside a rollout -------------------
     #
@@ -323,9 +327,9 @@ class BaseProxyModel(BaseEconomicModel):
         """
         return RolloutState(
             belief=deepcopy(self._belief),
-            feat_prev=None if self._feat_prev is None else self._feat_prev.copy(),
-            levels_prev=None if self._levels_prev is None else self._levels_prev.copy(),
-            exog_prev=None if self._exog_prev is None else self._exog_prev.copy(),
+            feat_prev=_copy_or_none(self._feat_prev),
+            levels_prev=_copy_or_none(self._levels_prev),
+            exog_prev=_copy_or_none(self._exog_prev),
             n_solutions=len(self._solutions),
         )
 
@@ -336,15 +340,9 @@ class BaseProxyModel(BaseEconomicModel):
         restored any number of times.
         """
         self._belief = deepcopy(snapshot.belief)
-        self._feat_prev = (
-            None if snapshot.feat_prev is None else snapshot.feat_prev.copy()
-        )
-        self._levels_prev = (
-            None if snapshot.levels_prev is None else snapshot.levels_prev.copy()
-        )
-        self._exog_prev = (
-            None if snapshot.exog_prev is None else snapshot.exog_prev.copy()
-        )
+        self._feat_prev = _copy_or_none(snapshot.feat_prev)
+        self._levels_prev = _copy_or_none(snapshot.levels_prev)
+        self._exog_prev = _copy_or_none(snapshot.exog_prev)
         del self._solutions[snapshot.n_solutions :]
 
     def advance(self, parameters: Parameters, actions: Actions) -> State:
