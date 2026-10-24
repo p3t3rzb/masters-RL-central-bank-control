@@ -36,7 +36,16 @@ from economic_models.interface import ModelInterface
 from economic_models.proxy.base import BaseProxyModel, FitData, StepContext
 from economic_models.proxy.transform import StationarizingTransform
 
+#: Clamp on the predicted log-scales, so no component collapses onto a point
+#: (NLL -> -inf) or spreads into an uninformative blob.
 _LOG_SIG_MIN, _LOG_SIG_MAX = -7.0, 3.0
+
+#: Smallest data set that gets a held-out validation split; below it the epoch
+#: is selected on the training NLL itself.
+_MIN_ROWS_TO_HOLD_OUT = 5
+
+#: Validation-NLL drop that counts as an improvement (resets the patience).
+_MIN_IMPROVEMENT = 1e-6
 
 
 class _MDNNet(nn.Module):
@@ -145,32 +154,55 @@ class MDNProxy(BaseProxyModel):
     # -- estimation ----------------------------------------------------------
 
     def _fit(self, data: FitData) -> None:
-        """Train the MDN by Adam on the mixture NLL, restoring the best-validation-epoch weights."""
+        """Train the MDN by Adam on the mixture NLL.
+
+        Restores the weights of the best-validation-NLL epoch.
+        """
         X = self._design(data.z, data.u_next)
         Y = data.y
         torch.manual_seed(self.seed if self.seed is not None else 0)
-
-        # Shuffled train/validation split for best-epoch model selection.
-        rng = np.random.default_rng(self.seed)
-        n = len(X)
-        n_val = max(1, int(round(self.val_fraction * n))) if n > 4 else 0
-        perm = rng.permutation(n)
-        val_idx, tr_idx = perm[:n_val], perm[n_val:]
+        val_idx, tr_idx = self._split(len(X))
 
         self._x_scaler = StandardScaler().fit(X[tr_idx])
         self._y_scaler = StandardScaler().fit(Y[tr_idx])
         Xs = self._t(self._x_scaler.transform(X))
         Ys = self._t(self._y_scaler.transform(Y))
         Xtr, Ytr = Xs[tr_idx], Ys[tr_idx]
-        Xval, Yval = (Xs[val_idx], Ys[val_idx]) if n_val else (Xtr, Ytr)
+        # Too few rows to hold any out: select the epoch on the training NLL.
+        Xval, Yval = (Xs[val_idx], Ys[val_idx]) if len(val_idx) else (Xtr, Ytr)
 
         self.net_ = _MDNNet(
             X.shape[1], Y.shape[1], self.n_components, self.hidden, self.n_layers
         ).to(self.device)
+        self._train(Xtr, Ytr, Xval, Yval)
+
+    def _split(self, n: int) -> tuple[np.ndarray, np.ndarray]:
+        """Shuffled ``(val_idx, train_idx)`` split for best-epoch model selection."""
+        rng = np.random.default_rng(self.seed)
+        n_val = (
+            max(1, int(round(self.val_fraction * n)))
+            if n >= _MIN_ROWS_TO_HOLD_OUT
+            else 0
+        )
+        perm = rng.permutation(n)
+        return perm[:n_val], perm[n_val:]
+
+    def _train(
+        self,
+        Xtr: torch.Tensor,
+        Ytr: torch.Tensor,
+        Xval: torch.Tensor,
+        Yval: torch.Tensor,
+    ) -> None:
+        """Full-batch Adam epochs, keeping the best-validation weights.
+
+        Stops after :attr:`patience` epochs without an improvement of at least
+        :data:`_MIN_IMPROVEMENT` (``patience=0`` runs every epoch).
+        """
+        assert self.net_ is not None
         opt = torch.optim.Adam(
             self.net_.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
-
         best_val, best_state, best_epoch, stale = float("inf"), None, 0, 0
         self.history_ = []
         for epoch in range(1, self.epochs + 1):
@@ -183,7 +215,7 @@ class MDNProxy(BaseProxyModel):
             with torch.no_grad():
                 val = float(_mixture_nll(Yval, *self.net_(Xval)))
             self.history_.append(val)
-            if val < best_val - 1e-6:
+            if val < best_val - _MIN_IMPROVEMENT:
                 best_val, best_epoch, stale = val, epoch, 0
                 best_state = {k: v.clone() for k, v in self.net_.state_dict().items()}
             else:
