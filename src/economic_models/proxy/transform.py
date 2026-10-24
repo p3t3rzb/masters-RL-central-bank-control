@@ -47,11 +47,15 @@ class StationarizingTransform:
         self.spec = spec
         self.state_names = spec.state_names
         self.exog_names = spec.exog_names
+        self._init_state_columns(spec)
+        self._init_exog_columns(spec)
 
+    def _init_state_columns(self, spec: TransformSpec) -> None:
+        """Masks, denominator index and feature names for the state columns."""
         state = self.state_names
         self._state_log_diff = np.array([name in spec.log_diff for name in state])
         self._state_ratio = np.array([name in spec.ratio_to for name in state])
-        self._y_col = state.index(spec.denominator)
+        self._denominator_col = state.index(spec.denominator)
         # Names of the log-diffed columns, in mask order -- used to name the
         # offending series if a non-positive level ever reaches the log.
         self._state_log_diff_names = tuple(n for n in state if n in spec.log_diff)
@@ -59,6 +63,8 @@ class StationarizingTransform:
             self._state_feature_name(name, spec) for name in state
         )
 
+    def _init_exog_columns(self, spec: TransformSpec) -> None:
+        """Log-diff mask and feature names for the (forward-only) exog columns."""
         exog = self.exog_names
         self._exog_log_diff = np.array([name in spec.exog_log_diff for name in exog])
         self._exog_log_diff_names = tuple(n for n in exog if n in spec.exog_log_diff)
@@ -123,7 +129,7 @@ class StationarizingTransform:
             current[:, self._state_log_diff], names
         ) - self._log(previous[:, self._state_log_diff], names)
         features[:, self._state_ratio] = (
-            current[:, self._state_ratio] / current[:, [self._y_col]]
+            current[:, self._state_ratio] / current[:, [self._denominator_col]]
         )
         return features
 
@@ -139,7 +145,9 @@ class StationarizingTransform:
         levels[self._state_log_diff] = previous_levels[self._state_log_diff] * np.exp(
             features[self._state_log_diff]
         )
-        levels[self._state_ratio] = features[self._state_ratio] * levels[self._y_col]
+        levels[self._state_ratio] = (
+            features[self._state_ratio] * levels[self._denominator_col]
+        )
         return levels
 
     # -- exogenous side (forward only) --------------------------------------
