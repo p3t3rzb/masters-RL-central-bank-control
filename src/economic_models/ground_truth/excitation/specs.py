@@ -339,9 +339,8 @@ class CrisisSpec:
 
     prob: float  #: annual onset probability (converted to a per-step hazard by dt)
     impulses: Mapping[str, float]  #: level shock per input at onset
-    decay_range: tuple[
-        float, float
-    ]  #: per-onset *annual* geometric decay, drawn uniformly
+    #: per-onset *annual* geometric decay, drawn uniformly
+    decay_range: tuple[float, float]
     min_gap: int = 6  #: minimum years between successive onsets
     severity_range: tuple[float, float] = (1.0, 1.0)  #: per-onset magnitude scale
     financial_prob: float = 0.0  #: chance an onset also triggers the financial bundle

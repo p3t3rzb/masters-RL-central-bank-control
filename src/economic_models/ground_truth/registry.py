@@ -48,19 +48,15 @@ class GroundTruthSpec:
     """Everything the pipeline needs in order to run against one ground-truth model."""
 
     name: str  #: the name a config selects this model by
-    interface: (
-        ModelInterface  #: the value spaces and stationarisation a proxy is handed
-    )
+    #: the value spaces and stationarisation a proxy is handed
+    interface: ModelInterface
     model: type[GrowthModel] | type[SwModel]  #: the structural model itself
-    generator: type[
-        ExcitedRunGenerator
-    ]  #: draws excited runs and scenario continuations
-    excitation: (
-        type[GrowthExcitationConfig] | type[SwExcitationConfig]
-    )  #: the excitation family, whose presets are named
-    calibration: (
-        type[GrowthCalibration] | type[SwCalibration]
-    )  #: the calibration, whose ``baseline()`` gives the resting levers
+    #: draws excited runs and scenario continuations
+    generator: type[ExcitedRunGenerator]
+    #: the excitation family, whose presets are named
+    excitation: type[GrowthExcitationConfig] | type[SwExcitationConfig]
+    #: the calibration, whose ``baseline()`` gives the resting levers
+    calibration: type[GrowthCalibration] | type[SwCalibration]
     excitations: tuple[str, ...]  #: the preset names this family offers
     #: The box the environment maps the agent's normalised action onto. Wider than
     #: the excitation's own bands, deliberately -- see :mod:`control.env`.
@@ -69,12 +65,10 @@ class GroundTruthSpec:
     #: shortfalls against. One for GROWTH, whose labour market clears at full
     #: employment; below one wherever a steady-state mark-up leaves slack.
     employment_target: float
-    er_bounds: tuple[
-        float, float
-    ]  #: employment rates outside which the economy has collapsed
-    pi_bounds: tuple[
-        float, float
-    ]  #: inflation rates outside which the economy has collapsed
+    #: employment rates outside which the economy has collapsed
+    er_bounds: tuple[float, float]
+    #: inflation rates outside which the economy has collapsed
+    pi_bounds: tuple[float, float]
     #: The lever a rule-based reference policy moves, and the response to the
     #: inflation gap that lever already owes before any tuned gain is added.
     #:

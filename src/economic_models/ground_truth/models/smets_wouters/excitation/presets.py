@@ -45,9 +45,8 @@ from economic_models.ground_truth.models.smets_wouters.excitation.specs import (
 class SwExcitationConfig(ExcitationConfig):
     """Excitation of the Smets-Wouters economy, with its two model-specific drivers."""
 
-    gov_spending: (
-        SpendingSpec  #: the exogenous spending disturbance and its fiscal reflex
-    )
+    #: the exogenous spending disturbance and its fiscal reflex
+    gov_spending: SpendingSpec
     labour_force: RandomWalkSpec  #: demographics
     energy: RandomWalkSpec  #: the observed cost-push driver
 

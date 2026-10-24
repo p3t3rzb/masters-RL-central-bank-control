@@ -75,14 +75,12 @@ class GrowthExcitationConfig(ExcitationConfig):
             # drift, not policy-scale shocks, and the corridor must survive their
             # worst combinations.
             hidden={
-                "RA": AR1Spec(
-                    0.002, -0.008, 0.008
-                ),  # expected-sales disturbance (11.2)
+                # expected-sales disturbance (11.2)
+                "RA": AR1Spec(0.002, -0.008, 0.008),
                 "alpha1": AR1Spec(0.004, 0.72, 0.78),  # consume out of income
                 "alpha2": AR1Spec(0.0006, 0.058, 0.070),  # consume out of wealth
-                "gamma0": AR1Spec(
-                    0.00015, 0.00022, 0.00222
-                ),  # investment animal spirits
+                # investment animal spirits
+                "gamma0": AR1Spec(0.00015, 0.00022, 0.00222),
                 "eta0": AR1Spec(0.001, 0.068, 0.080),  # household new-credit demand
                 "omega3": AR1Spec(0.008, 0.41, 0.50),  # wage adjustment speed
                 "psid": AR1Spec(0.002, 0.14, 0.165),  # dividend payout ratio

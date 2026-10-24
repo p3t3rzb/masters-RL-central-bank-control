@@ -166,9 +166,8 @@ class SwCalibration:
 
     params: SwParams  #: the deep parameters
     shock_sigma: Mapping[str, float]  #: standard error of each innovation
-    exogenous_baselines: Mapping[
-        str, float
-    ]  #: baselines of the visible exogenous inputs
+    #: baselines of the visible exogenous inputs
+    exogenous_baselines: Mapping[str, float]
     initial_levels: Mapping[str, float]  #: where the reconstructed observables start
     drift: tuple[str, ...] = field(default=())  #: deep parameters the excitation moves
 
