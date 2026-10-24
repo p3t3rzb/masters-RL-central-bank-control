@@ -22,7 +22,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Protocol, Self
 
 import numpy as np
 
@@ -33,6 +33,25 @@ from economic_models.ground_truth.excitation.specs import (
     ExcitationJitter,
     StochasticVolatilitySpec,
 )
+
+#: Total absolute deviation below which a fading crisis episode counts as spent
+#: and is dropped, so a long history does not carry thousands of dead episodes.
+_SPENT_CRISIS = 1e-6
+
+
+class _Perturbable(Protocol):
+    """A spec that can redraw a neighbouring copy of itself."""
+
+    def perturbed(self, rng: np.random.Generator, jitter: ExcitationJitter) -> Self:
+        """A neighbouring copy of this spec, redrawn under ``jitter``."""
+        ...
+
+
+def _perturbed_or_none[S: _Perturbable](
+    spec: S | None, rng: np.random.Generator, jitter: ExcitationJitter
+) -> S | None:
+    """``spec`` perturbed under ``jitter``, or ``None`` for a disabled layer."""
+    return None if spec is None else spec.perturbed(rng, jitter)
 
 
 @dataclass(frozen=True)
@@ -84,15 +103,9 @@ class ExcitationConfig:
             self,
             visible={n: s.perturbed(rng, jitter) for n, s in self.visible.items()},
             hidden={n: s.perturbed(rng, jitter) for n, s in self.hidden.items()},
-            volatility=(
-                None
-                if self.volatility is None
-                else self.volatility.perturbed(rng, jitter)
-            ),
-            crisis=None if self.crisis is None else self.crisis.perturbed(rng, jitter),
-            climate=None
-            if self.climate is None
-            else self.climate.perturbed(rng, jitter),
+            volatility=_perturbed_or_none(self.volatility, rng, jitter),
+            crisis=_perturbed_or_none(self.crisis, rng, jitter),
+            climate=_perturbed_or_none(self.climate, rng, jitter),
         )._perturb_model_specs(rng, jitter)
 
     def _perturb_model_specs(
@@ -215,9 +228,9 @@ class ExcitationProcess(ABC):
         An input the previous spec did not excite starts at deviation zero, which
         is the only sensible reading of "this was not moving before".
         """
-        dev = self._devs.get(name, 0.0)
         if old is None:
             return 0.0
+        dev = self._devs.get(name, 0.0)
         base = float(self._baselines[name])
         return dev + float(
             np.clip(base + old.center, old.lower, old.upper)
@@ -294,20 +307,23 @@ class ExcitationProcess(ABC):
         self._fade_crisis_episodes()
         self._since_crisis += 1
         self._maybe_erupt_crisis(crisis)
+        self._crisis_total = self._summed_crisis_episodes()
+        self.crisis_intensity = sum(abs(v) for v in self._crisis_total.values())
 
+    def _summed_crisis_episodes(self) -> dict[str, float]:
+        """Each input's crisis level shock: its deviation summed over live episodes."""
         total: dict[str, float] = {}
         for dev, _ in self._crisis_episodes:
             for name, value in dev.items():
                 total[name] = total.get(name, 0.0) + value
-        self._crisis_total = total
-        self.crisis_intensity = sum(abs(v) for v in total.values())
+        return total
 
     def _fade_crisis_episodes(self) -> None:
         """Fade every live episode by its own decay; drop the spent ones."""
         faded = []
         for dev, decay in self._crisis_episodes:
             dev = {name: value * decay for name, value in dev.items()}
-            if sum(abs(v) for v in dev.values()) > 1e-6:
+            if sum(abs(v) for v in dev.values()) > _SPENT_CRISIS:
                 faded.append((dev, decay))
         self._crisis_episodes = faded
 
