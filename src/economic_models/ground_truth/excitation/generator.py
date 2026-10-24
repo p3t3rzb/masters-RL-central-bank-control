@@ -40,6 +40,10 @@ from economic_models.variables import Actions, Parameters, State
 #: ``step``, ``run`` and the ``solutions`` record the driver reads.
 DrivenModel = PysolveEconomicModel | LinearREEconomicModel
 
+#: Offset from a continuation's seed to the seed of its climate redraw: far
+#: enough from any seed a caller hands out that the two streams never coincide.
+_CLIMATE_SEED_OFFSET = 500_000_000
+
 
 @dataclass(frozen=True)
 class BranchCapture:
@@ -85,6 +89,31 @@ def _cols(rows: list, width: int) -> np.ndarray:
     ``run.states[:, i]`` and the transform see ``(0, n_col)``, not ``(0,)``.
     """
     return np.asarray(rows, dtype=float).reshape(len(rows), width)
+
+
+def _trace(values: list[float], excited: bool) -> np.ndarray | None:
+    """A per-step diagnostic trace as an array, or ``None`` for an unexcited run.
+
+    An unexcited run has no volatility regime or crisis state to report, and
+    ``None`` rather than a row of ones and zeros is what says so.
+    """
+    return np.asarray(values, dtype=float) if excited else None
+
+
+def _entry[T](entries: Sequence[T | None] | None, j: int) -> T | None:
+    """Entry ``j`` of an optional per-continuation argument, ``None`` when it is absent."""
+    return None if entries is None else entries[j]
+
+
+def _check_length(
+    name: str, entries: Sequence[Any] | None, n_continuations: int
+) -> None:
+    """Check an optional per-continuation argument has ``n_continuations`` entries."""
+    if entries is not None and len(entries) != n_continuations:
+        raise ValueError(
+            f"{name} must have n_continuations entries "
+            f"({len(entries)} != {n_continuations})"
+        )
 
 
 class ExcitedRunGenerator(ABC):
@@ -299,12 +328,7 @@ class ExcitedRunGenerator(ABC):
         self._check_continuation_args(
             n_continuations, branch_at, continuation_seeds, continuation_configs
         )
-        wanted = sorted(set(branch_at) | {main_steps - 1})
-        if wanted[0] < 0 or wanted[-1] > main_steps - 1:
-            raise ValueError(
-                f"branch_at must index rows of a {main_steps}-step run, got "
-                f"[{wanted[0]}, {wanted[-1]}]"
-            )
+        wanted = self._branch_rows(main_steps, branch_at)
 
         rng = np.random.default_rng(seed)
         model = self._settled_model()
@@ -318,29 +342,50 @@ class ExcitedRunGenerator(ABC):
             seed,
             branch_at=wanted,
         )
+        self._require_captures(wanted, captures, len(main_run))
+
+        scenarios = [
+            self._continuation(
+                captures[branch_at[j]].process,
+                _entry(continuation_seeds, j),
+                _entry(continuation_configs, j),
+                climate,
+                continuation_steps,
+            )
+            for j in range(n_continuations)
+        ]
+        return main_run, scenarios, captures
+
+    def _branch_rows(self, main_steps: int, branch_at: Sequence[int]) -> list[int]:
+        """The sorted rows to capture: every fork row, plus the run's last one.
+
+        The last row is always captured, because it is the branch state
+        :meth:`generate_with_continuations` returns. A row outside the run raises.
+        """
+        last = main_steps - 1
+        wanted = sorted(set(branch_at) | {last})
+        if wanted[0] < 0 or wanted[-1] > last:
+            raise ValueError(
+                f"branch_at must index rows of a {main_steps}-step run, got "
+                f"[{wanted[0]}, {wanted[-1]}]"
+            )
+        return wanted
+
+    @staticmethod
+    def _require_captures(
+        wanted: Sequence[int], captures: Mapping[int, BranchCapture], run_length: int
+    ) -> None:
+        """Raise if the run collapsed before a row a future was asked to fork from.
+
+        Forking from the nearest row that *was* reached instead would silently
+        hand the future a different starting point than the one requested.
+        """
         missing = [t for t in wanted if t not in captures]
         if missing:
             raise RuntimeError(
-                f"the run ended after {len(main_run)} steps and never reached rows "
+                f"the run ended after {run_length} steps and never reached rows "
                 f"{missing}, which futures were asked to fork from"
             )
-
-        scenarios: list[Scenario] = []
-        for j in range(n_continuations):
-            cont_seed = None if continuation_seeds is None else continuation_seeds[j]
-            cont_config = (
-                None if continuation_configs is None else continuation_configs[j]
-            )
-            scenarios.append(
-                self._continuation(
-                    captures[branch_at[j]].process,
-                    cont_seed,
-                    cont_config,
-                    climate,
-                    continuation_steps,
-                )
-            )
-        return main_run, scenarios, captures
 
     def _check_continuation_args(
         self,
@@ -354,27 +399,10 @@ class ExcitedRunGenerator(ABC):
         Also checks each continuation config records the generator's own hidden
         inputs, since a :class:`Scenario`'s hidden block is laid out by them.
         """
-        if len(branch_at) != n_continuations:
-            raise ValueError(
-                "branch_at must have n_continuations entries "
-                f"({len(branch_at)} != {n_continuations})"
-            )
-        if (
-            continuation_seeds is not None
-            and len(continuation_seeds) != n_continuations
-        ):
-            raise ValueError(
-                "continuation_seeds must have n_continuations entries "
-                f"({len(continuation_seeds)} != {n_continuations})"
-            )
-        if continuation_configs is None:
-            return
-        if len(continuation_configs) != n_continuations:
-            raise ValueError(
-                "continuation_configs must have n_continuations entries "
-                f"({len(continuation_configs)} != {n_continuations})"
-            )
-        for cfg in continuation_configs:
+        _check_length("branch_at", branch_at, n_continuations)
+        _check_length("continuation_seeds", continuation_seeds, n_continuations)
+        _check_length("continuation_configs", continuation_configs, n_continuations)
+        for cfg in continuation_configs or ():
             if cfg is not None and cfg.hidden_names != self.config.hidden_names:
                 raise ValueError(
                     "a continuation config must excite the same hidden inputs "
@@ -408,7 +436,9 @@ class ExcitedRunGenerator(ABC):
             # reproducible without shifting the shock stream that follows it.
             if config.climate is not None:
                 cont_climate = config.climate.draw(
-                    np.random.default_rng(None if seed is None else seed + 500_000_000)
+                    np.random.default_rng(
+                        None if seed is None else seed + _CLIMATE_SEED_OFFSET
+                    )
                 )
             cont_process.reconfigure(config, climate=cont_climate)
         return self._drive_scenario(cont_process, n_steps, cont_climate, seed)
@@ -511,10 +541,8 @@ class ExcitedRunGenerator(ABC):
             hidden=_cols(hidden, len(hidden_names)),
             dt=self.dt,
             seed=seed,
-            volatility=np.asarray(volatility, dtype=float) if excited else None,
-            crisis_intensity=(
-                np.asarray(crisis_intensity, dtype=float) if excited else None
-            ),
+            volatility=_trace(volatility, excited),
+            crisis_intensity=_trace(crisis_intensity, excited),
             climate=climate,
         )
 
@@ -548,10 +576,7 @@ class ExcitedRunGenerator(ABC):
         dampened = 0
         collapsed = False
         for _ in range(n_steps):
-            if process is not None:
-                target = process.step(self._feedback(model))
-            else:
-                target = dict(applied)
+            target = self._next_target(model, process, applied)
             try:
                 target, attempts = self._solve_step(
                     model, target, applied, len(rows.states), seed
@@ -565,16 +590,62 @@ class ExcitedRunGenerator(ABC):
             applied = target
 
             self._record_row(rows, model, target, process)
-            if len(rows.states) - 1 in wanted:
-                captures[len(rows.states) - 1] = BranchCapture(
-                    index=len(rows.states) - 1,
-                    state=self._capture_state(model),
-                    process=None if process is None else copy.deepcopy(process),
-                    applied=dict(applied),
-                )
+            row = len(rows.states) - 1
+            if row in wanted:
+                captures[row] = self._capture(row, model, process, applied)
 
-        excited = process is not None
-        run = Run(
+        run = self._assemble_run(
+            rows,
+            seed,
+            climate,
+            dampened=dampened,
+            collapsed=collapsed,
+            excited=process is not None,
+        )
+        return run, applied, captures
+
+    def _next_target(
+        self,
+        model: DrivenModel,
+        process: ExcitationProcess | None,
+        applied: dict[str, float],
+    ) -> dict[str, float]:
+        """This step's intended inputs: a fresh draw, or the last ones on a reference path."""
+        if process is None:
+            return dict(applied)
+        return process.step(self._feedback(model))
+
+    def _capture(
+        self,
+        row: int,
+        model: DrivenModel,
+        process: ExcitationProcess | None,
+        applied: dict[str, float],
+    ) -> BranchCapture:
+        """Snapshot ``model`` and ``process`` as they stand having produced ``row``.
+
+        The process is deep-copied because the run carries on drawing from it;
+        a capture that aliased it would drift forward with the history.
+        """
+        return BranchCapture(
+            index=row,
+            state=self._capture_state(model),
+            process=None if process is None else copy.deepcopy(process),
+            applied=dict(applied),
+        )
+
+    def _assemble_run(
+        self,
+        rows: _RunRows,
+        seed: int | None,
+        climate: float | None,
+        *,
+        dampened: int,
+        collapsed: bool,
+        excited: bool,
+    ) -> Run:
+        """Stack the accumulated ``rows`` into the :class:`Run` they describe."""
+        return Run(
             states=_cols(rows.states, len(self.STATE.names())),
             params=_cols(rows.params, len(self.PARAMETERS.names())),
             actions=_cols(rows.actions, len(self.ACTIONS.names())),
@@ -582,14 +653,11 @@ class ExcitedRunGenerator(ABC):
             dt=self.dt,
             seed=seed,
             dampened_steps=dampened,
-            volatility=np.asarray(rows.volatility, dtype=float) if excited else None,
-            crisis_intensity=(
-                np.asarray(rows.crisis_intensity, dtype=float) if excited else None
-            ),
+            volatility=_trace(rows.volatility, excited),
+            crisis_intensity=_trace(rows.crisis_intensity, excited),
             climate=climate,
             collapsed=collapsed,
         )
-        return run, applied, captures
 
     def _record_row(
         self,
