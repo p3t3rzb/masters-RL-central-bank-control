@@ -36,6 +36,76 @@ class _Belief:
     cov: np.ndarray  # (m, m)
 
 
+@dataclass
+class _SufficientStats:
+    """The E-step's smoothed moments, pooled over every run: all the M-step reads.
+
+    Sums of ``E[. | f_{1:N}]`` cross-moments over time and runs; the ``P``
+    terms span only the transitions ``t >= 1``, the ``S`` terms every period.
+    """
+
+    Syy: np.ndarray  # (dy, dy) sum f_t f_t'
+    Syx: np.ndarray  # (dy, m)  sum f_t E[z_t]'
+    Sxx: np.ndarray  # (m, m)   E[z_t z_t'] over all t
+    P11: np.ndarray  # (m, m)   E[z_t z_t']    for t >= 1
+    P10: np.ndarray  # (m, m)   E[z_t z_{t-1}']
+    P1u: np.ndarray  # (m, ku)  E[z_t] u_t'
+    P00: np.ndarray  # (m, m)   E[z_{t-1} z_{t-1}']
+    P0u: np.ndarray  # (m, ku)  E[z_{t-1}] u_t'
+    Puu: np.ndarray  # (ku, ku) u_t u_t'
+    m0_acc: np.ndarray  # (m,)  sum of smoothed initial means
+    V0_acc: np.ndarray  # (m, m) sum of smoothed initial second moments
+    n_all: int = 0  # periods pooled
+    n_trans: int = 0  # transitions pooled
+    loglik: float = 0.0  # summed run log-likelihoods
+
+    @classmethod
+    def zeros(cls, m: int, dy: int, ku: int) -> _SufficientStats:
+        """Empty accumulators for latent dim ``m``, ``dy`` observations, ``ku`` exog."""
+        return cls(
+            Syy=np.zeros((dy, dy)),
+            Syx=np.zeros((dy, m)),
+            Sxx=np.zeros((m, m)),
+            P11=np.zeros((m, m)),
+            P10=np.zeros((m, m)),
+            P1u=np.zeros((m, ku)),
+            P00=np.zeros((m, m)),
+            P0u=np.zeros((m, ku)),
+            Puu=np.zeros((ku, ku)),
+            m0_acc=np.zeros(m),
+            V0_acc=np.zeros((m, m)),
+        )
+
+    def add_run(
+        self,
+        Y: np.ndarray,
+        Uc: np.ndarray,
+        ms: np.ndarray,
+        Ps: np.ndarray,
+        Plag: np.ndarray,
+        ll: float,
+    ) -> None:
+        """Fold one run's smoothed means/covs and log-likelihood into the sums."""
+        self.loglik += ll
+        N = len(Y)
+        Ezz = Ps + ms[:, :, None] * ms[:, None, :]  # (N,m,m) E[z_t z_t']
+        self.Syy += Y.T @ Y
+        self.Syx += Y.T @ ms
+        self.Sxx += Ezz.sum(axis=0)
+        self.n_all += N
+        if N >= 2:
+            Ezz1 = Plag[1:] + ms[1:, :, None] * ms[:-1, None, :]
+            self.P11 += Ezz[1:].sum(axis=0)
+            self.P10 += Ezz1.sum(axis=0)
+            self.P1u += ms[1:].T @ Uc[1:]
+            self.P00 += Ezz[:-1].sum(axis=0)
+            self.P0u += ms[:-1].T @ Uc[1:]
+            self.Puu += Uc[1:].T @ Uc[1:]
+            self.n_trans += N - 1
+        self.m0_acc += ms[0]
+        self.V0_acc += Ps[0] + np.outer(ms[0], ms[0])
+
+
 class KalmanEncoder(_StandardizedFeatures, GenerativeEncoder):
     """A linear-Gaussian state-space encoder (Kalman filter, EM-fit)."""
 
@@ -96,6 +166,16 @@ class KalmanEncoder(_StandardizedFeatures, GenerativeEncoder):
 
     # -- Kalman filter / smoother (single run, standardized) ----------------
 
+    def _innovation_cov(self, Pp: np.ndarray) -> np.ndarray:
+        """Predictive observation covariance ``S = C Pp C' + R``, symmetrized.
+
+        Shared by the filter, the online update and the stochastic forecast so
+        the three cannot disagree on the jitter or the symmetrization.
+        """
+        assert self.C_ is not None and self.R_ is not None
+        S = self.C_ @ Pp @ self.C_.T + self.R_
+        return 0.5 * (S + S.T) + self.jitter * np.eye(len(S))
+
     def _filter(
         self, Y: np.ndarray, Uc: np.ndarray
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]:
@@ -121,8 +201,7 @@ class KalmanEncoder(_StandardizedFeatures, GenerativeEncoder):
             else:
                 mp[t] = A @ mf[t - 1] + B @ Uc[t]
                 Pp[t] = A @ Pf[t - 1] @ A.T + Q
-            S = C @ Pp[t] @ C.T + R
-            S = 0.5 * (S + S.T) + self.jitter * np.eye(dy)
+            S = self._innovation_cov(Pp[t])
             # One Cholesky factor serves the gain, the quadratic form and the
             # log-det (2 sum log diag L) -- replacing a separate matrix inverse
             # and slogdet, each its own factorisation, in this innermost EM loop.
@@ -219,9 +298,37 @@ class KalmanEncoder(_StandardizedFeatures, GenerativeEncoder):
         self.R_ = np.diag(obs_resid.var(axis=0) + self.jitter)
         z0 = np.array([z[0] for z in Z])
         self.mu0_ = z0.mean(axis=0)
-        self.V0_ = (np.cov(z0.T) if len(z0) > 1 else np.eye(m)) + np.eye(
-            m
-        ) * self.jitter
+        z0_cov = np.cov(z0.T) if len(z0) > 1 else np.eye(m)
+        self.V0_ = z0_cov + np.eye(m) * self.jitter
+
+    def _e_step(self, runs: list[tuple[np.ndarray, np.ndarray]]) -> _SufficientStats:
+        """Filter + smooth every run under the current system; pool the moments."""
+        assert self.C_ is not None and self.B_ is not None
+        stats = _SufficientStats.zeros(self._m, self.C_.shape[0], self.B_.shape[1])
+        for Y, Uc in runs:
+            mf, Pf, mp, Pp, Kf, ll = self._filter(Y, Uc)
+            ms, Ps, Plag = self._smooth(mf, Pf, mp, Pp, Kf)
+            stats.add_run(Y, Uc, ms, Ps, Plag, ll)
+        return stats
+
+    def _m_step(self, stats: _SufficientStats, n_runs: int) -> None:
+        """Closed-form Gaussian updates of every system matrix from ``stats``."""
+        m, ku = self._m, stats.Puu.shape[0]
+        self.C_ = np.linalg.solve(stats.Sxx.T, stats.Syx.T).T  # Syx @ inv(Sxx)
+        R = (stats.Syy - self.C_ @ stats.Syx.T) / stats.n_all
+        self.R_ = np.diag(np.maximum(np.diag(R), self.jitter))
+
+        Num = np.hstack([stats.P10, stats.P1u])  # (m, m+ku)
+        Den = np.block([[stats.P00, stats.P0u], [stats.P0u.T, stats.Puu]])
+        Den += self.jitter * np.eye(m + ku)
+        AB = np.linalg.solve(Den.T, Num.T).T  # Num @ inv(Den)
+        self.A_, self.B_ = self._stabilize(AB[:, :m]), AB[:, m:]
+        Q = (stats.P11 - AB @ Num.T) / max(stats.n_trans, 1)
+        self.Q_ = 0.5 * (Q + Q.T) + self.jitter * np.eye(m)
+
+        self.mu0_ = stats.m0_acc / n_runs
+        V0 = stats.V0_acc / n_runs - np.outer(self.mu0_, self.mu0_)
+        self.V0_ = 0.5 * (V0 + V0.T) + self.jitter * np.eye(m)
 
     def fit(self, feature_runs: list[tuple[np.ndarray, np.ndarray]]) -> Self:
         """Fit the state-space model by EM and cache the standardisers."""
@@ -229,69 +336,15 @@ class KalmanEncoder(_StandardizedFeatures, GenerativeEncoder):
         runs = [(self._sy(F), self._su(U)) for F, U in feature_runs]
 
         self._pca_init(runs)
-        assert self.C_ is not None and self.B_ is not None
-        m, dy, ku = self._m, self.C_.shape[0], self.B_.shape[1]
         self.loglik_ = []
         prev_ll = -np.inf
         for _ in range(self.max_iter):
-            # -- E-step: filter + smooth every run, accumulate sufficient stats.
-            Syy = np.zeros((dy, dy))
-            Syx = np.zeros((dy, m))
-            Sxx = np.zeros((m, m))  # E[z_t z_t'] over all t
-            P11 = np.zeros((m, m))  # E[z_t z_t']    for t >= 1
-            P10 = np.zeros((m, m))  # E[z_t z_{t-1}']
-            P1u = np.zeros((m, ku))
-            P00 = np.zeros((m, m))  # E[z_{t-1} z_{t-1}']
-            P0u = np.zeros((m, ku))
-            Puu = np.zeros((ku, ku))
-            n_all = n_trans = 0
-            m0_acc = np.zeros(m)
-            V0_acc = np.zeros((m, m))
-            total_ll = 0.0
-            for Y, Uc in runs:
-                mf, Pf, mp, Pp, Kf, ll = self._filter(Y, Uc)
-                ms, Ps, Plag = self._smooth(mf, Pf, mp, Pp, Kf)
-                total_ll += ll
-                N = len(Y)
-                Ezz = Ps + ms[:, :, None] * ms[:, None, :]  # (N,m,m) E[z_t z_t']
-                Syy += Y.T @ Y
-                Syx += Y.T @ ms
-                Sxx += Ezz.sum(axis=0)
-                n_all += N
-                if N >= 2:
-                    Ezz1 = Plag[1:] + ms[1:, :, None] * ms[:-1, None, :]
-                    P11 += Ezz[1:].sum(axis=0)
-                    P10 += Ezz1.sum(axis=0)
-                    P1u += ms[1:].T @ Uc[1:]
-                    P00 += Ezz[:-1].sum(axis=0)
-                    P0u += ms[:-1].T @ Uc[1:]
-                    Puu += Uc[1:].T @ Uc[1:]
-                    n_trans += N - 1
-                m0_acc += ms[0]
-                V0_acc += Ps[0] + np.outer(ms[0], ms[0])
-            self.loglik_.append(total_ll)
-
-            # -- M-step: closed-form Gaussian updates.
-            self.C_ = np.linalg.solve(Sxx.T, Syx.T).T  # Syx @ inv(Sxx)
-            R = (Syy - self.C_ @ Syx.T) / n_all
-            self.R_ = np.diag(np.maximum(np.diag(R), self.jitter))
-
-            Num = np.hstack([P10, P1u])  # (m, m+ku)
-            Den = np.block([[P00, P0u], [P0u.T, Puu]])
-            Den += self.jitter * np.eye(m + ku)
-            AB = np.linalg.solve(Den.T, Num.T).T  # Num @ inv(Den)
-            self.A_, self.B_ = self._stabilize(AB[:, :m]), AB[:, m:]
-            Q = (P11 - AB @ Num.T) / max(n_trans, 1)
-            self.Q_ = 0.5 * (Q + Q.T) + self.jitter * np.eye(m)
-
-            n_runs = len(runs)
-            self.mu0_ = m0_acc / n_runs
-            V0 = V0_acc / n_runs - np.outer(self.mu0_, self.mu0_)
-            self.V0_ = 0.5 * (V0 + V0.T) + self.jitter * np.eye(m)
-
-            if total_ll - prev_ll < self.tol * (abs(prev_ll) + 1.0):
+            stats = self._e_step(runs)
+            self.loglik_.append(stats.loglik)
+            self._m_step(stats, len(runs))
+            if stats.loglik - prev_ll < self.tol * (abs(prev_ll) + 1.0):
                 break
-            prev_ll = total_ll
+            prev_ll = stats.loglik
         self._fitted = True
         return self
 
@@ -332,9 +385,7 @@ class KalmanEncoder(_StandardizedFeatures, GenerativeEncoder):
         u = self._su(u_next[None, :])[0]
         mp, Pp = self._predict(belief, u)
         assert self.C_ is not None and self.R_ is not None
-        dy = self.C_.shape[0]
-        S = self.C_ @ Pp @ self.C_.T + self.R_
-        S = 0.5 * (S + S.T) + self.jitter * np.eye(dy)
+        S = self._innovation_cov(Pp)
         K = Pp @ self.C_.T @ np.linalg.inv(S)
         ImKC = np.eye(self._m) - K @ self.C_
         mean = mp + K @ (y - self.C_ @ mp)
@@ -355,10 +406,8 @@ class KalmanEncoder(_StandardizedFeatures, GenerativeEncoder):
         assert self.C_ is not None and self.R_ is not None
         y = self.C_ @ mp
         if rng is not None:
-            dy = self.C_.shape[0]
-            S = self.C_ @ Pp @ self.C_.T + self.R_
-            S = 0.5 * (S + S.T) + self.jitter * np.eye(dy)
-            y = y + np.linalg.cholesky(S) @ rng.standard_normal(dy)
+            S = self._innovation_cov(Pp)
+            y = y + np.linalg.cholesky(S) @ rng.standard_normal(len(y))
         return self._inv_y(y[None, :])[0]
 
     def forecast_means(self, Z: np.ndarray, U_next: np.ndarray) -> np.ndarray:
