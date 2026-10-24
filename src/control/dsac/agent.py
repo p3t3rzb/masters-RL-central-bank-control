@@ -195,13 +195,31 @@ class DSACAgent:
         was doing something else.
         """
         obs = self._t(batch.obs)
+        alpha = self.log_alpha.exp().detach()
+        critic_loss = self._critic_step(obs, batch, alpha)
+        actor_loss, logp, kl = self._actor_step(obs, alpha, anchor, anchor_weight)
+        self._temperature_step(logp)
+        self._polyak()
+        return {
+            "critic_loss": float(critic_loss.detach()),
+            "actor_loss": float(actor_loss.detach()),
+            "alpha": self.alpha,
+            "entropy": float(-logp.mean().detach()),
+            "anchor_kl": float(kl.detach()),
+        }
+
+    def _critic_step(
+        self, obs: torch.Tensor, batch: Batch, alpha: torch.Tensor
+    ) -> torch.Tensor:
+        """Fit both critics by quantile regression on the distributional soft target.
+
+        Returns the summed critic loss. ``obs`` is the batch's observations,
+        already on the device, since the actor step reads them too.
+        """
         action = self._t(batch.action)
         reward = self._t(batch.reward)
         next_obs = self._t(batch.next_obs)
         done = self._t(batch.done)
-        alpha = self.log_alpha.exp().detach()
-
-        # -- critics: quantile regression on the distributional soft target --
         with torch.no_grad():
             next_action, next_logp, _ = self.actor.sample(next_obs)
             target_quantiles = self._pessimistic(self.targets, next_obs, next_action)
@@ -217,8 +235,21 @@ class DSACAgent:
         self.critic_opt.zero_grad()
         critic_loss.backward()
         self.critic_opt.step()
+        return critic_loss
 
-        # -- actor: maximise risk(Z) with the entropy bonus -------------------
+    def _actor_step(
+        self,
+        obs: torch.Tensor,
+        alpha: torch.Tensor,
+        anchor: DSACAgent | None,
+        anchor_weight: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Move the actor toward ``risk(Z)`` plus the entropy bonus.
+
+        Returns ``(actor_loss, logp, kl)``: the loss, the log-probabilities of the
+        fresh actions (which the temperature step is fitted on), and the anchor
+        KL estimate (zero without an anchor; see :meth:`update`).
+        """
         fresh, logp, _ = self.actor.sample(obs)
         score = self.risk.aggregate(self._pessimistic(self.critics, obs, fresh))
         actor_loss = (alpha * logp - score).mean()
@@ -231,21 +262,14 @@ class DSACAgent:
         self.actor_opt.zero_grad()
         actor_loss.backward()
         self.actor_opt.step()
+        return actor_loss, logp, kl
 
-        # -- temperature: hold the policy at the target entropy ---------------
+    def _temperature_step(self, logp: torch.Tensor) -> None:
+        """Move the entropy temperature to hold the policy at the target entropy."""
         alpha_loss = -(self.log_alpha * (logp + self.target_entropy).detach()).mean()
         self.alpha_opt.zero_grad()
         alpha_loss.backward()
         self.alpha_opt.step()
-
-        self._polyak()
-        return {
-            "critic_loss": float(critic_loss.detach()),
-            "actor_loss": float(actor_loss.detach()),
-            "alpha": self.alpha,
-            "entropy": float(-logp.mean().detach()),
-            "anchor_kl": float(kl.detach()),
-        }
 
     def _pessimistic(
         self, critics: nn.ModuleList, obs: torch.Tensor, action: torch.Tensor
