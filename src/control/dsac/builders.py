@@ -144,7 +144,7 @@ def build_obs_encoder(name: str, *, latent: int = 10, seed: int = 0) -> StateEnc
     return build_encoder(name, latent=latent, seed=seed, role="obs_encoder")
 
 
-def _env(
+def _env_over(
     driver: ModelDriver,
     world: TrainingWorld,
     observer: Observer,
@@ -187,7 +187,7 @@ def build_env(
     seed: int,
 ) -> CentralBankEnv:
     """An environment over ``proxy`` drawing from the train or eval futures."""
-    return _env(
+    return _env_over(
         ProxyDriver(proxy, world),
         world,
         observer,
@@ -225,7 +225,7 @@ def build_truth_env(
     which a deployment needs: it takes one future for hundreds of periods where
     training cut the bank into episodes of fifty.
     """
-    return _env(
+    return _env_over(
         GroundTruthDriver(world),
         world,
         observer,

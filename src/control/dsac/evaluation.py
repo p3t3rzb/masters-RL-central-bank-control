@@ -15,6 +15,11 @@ from control.dsac.policies import Policy, reset_policy
 from control.env import CentralBankEnv
 from control.world import Episode
 
+#: How far apart the seeds of two repeats of one future are. Wider than any bank,
+#: so repeat ``r`` of future ``i`` never reuses the seed of another future's roll.
+_REPEAT_SEED_STRIDE = 10_000
+
+
 # -- evaluation -------------------------------------------------------------
 
 
@@ -52,19 +57,14 @@ def evaluate(
     than by ``length``: a collapse is charged once for every period the episode
     would still have run, so the horizon is what that charge was priced against.
     """
-    episodes = env.episodes.all()[first : first + n_episodes]
-    if not episodes:
-        raise ValueError(
-            f"no futures at [{first}:{first + n_episodes}] of a bank of "
-            f"{len(env.episodes)}"
-        )
+    episodes = _futures(env, first, n_episodes)
     per_future, lengths, collapses, rolls = [], [], 0, 0
     terms: dict[str, list[float]] = {}
     for i, episode in enumerate(episodes):
         returns = []
         for r in range(repeats):
             total, steps, terminated = _score_episode(
-                env, policy, episode, seed + 10_000 * r + first + i, terms
+                env, policy, episode, seed + _REPEAT_SEED_STRIDE * r + first + i, terms
             )
             collapses += terminated
             returns.append(total)
@@ -83,6 +83,17 @@ def evaluate(
     }
     result.update({f"term_{k}": float(np.mean(v)) for k, v in terms.items()})
     return result
+
+
+def _futures(env: CentralBankEnv, first: int, n_episodes: int) -> list[Episode]:
+    """The ``n_episodes`` futures of ``env``'s bank from ``first``, never none."""
+    episodes = env.episodes.all()[first : first + n_episodes]
+    if not episodes:
+        raise ValueError(
+            f"no futures at [{first}:{first + n_episodes}] of a bank of "
+            f"{len(env.episodes)}"
+        )
+    return episodes
 
 
 def _score_episode(
@@ -142,12 +153,7 @@ def rollout(
     from the collapse onwards and a column-wise average is over the survivors.
     """
     action_names = env.interface.actions.names()
-    episodes = env.episodes.all()[first : first + n_episodes]
-    if not episodes:
-        raise ValueError(
-            f"no futures at [{first}:{first + n_episodes}] of a bank of "
-            f"{len(env.episodes)}"
-        )
+    episodes = _futures(env, first, n_episodes)
     # An episode is the shorter of its future and the environment's cap (see
     # :attr:`~control.env.EnvConfig.horizon`), so the panels are that wide --
     # sizing them by the future alone would draw a run of trailing ``NaN`` as
@@ -159,7 +165,7 @@ def rollout(
         for name in (*action_names, "growth", "potential", "ER", "PI")
     }
     for i, episode in enumerate(episodes):
-        _record_episode(env, policy, episode, seed + first + i, cap, series, i)
+        _record_episode(env, policy, episode, seed + first + i, cap, series, row=i)
     return series
 
 
@@ -170,9 +176,10 @@ def _record_episode(
     seed: int,
     cap: int,
     series: dict[str, np.ndarray],
-    i: int,
+    *,
+    row: int,
 ) -> None:
-    """Roll ``policy`` through ``episode`` under ``seed``, filling row ``i`` of ``series``.
+    """Roll ``policy`` through ``episode`` under ``seed``, filling ``row`` of ``series``.
 
     At most ``cap`` steps are rolled; the row is left ``NaN`` from a collapse on.
     """
@@ -183,21 +190,23 @@ def _record_episode(
 
     obs, _ = env.reset(seed=seed, episode=episode)
     reset_policy(policy)
-    row = episode.branch.row
-    prev_yk = float(world.history.states[row][yk])
-    prev_nfe = float(world.history.params[row][nfe])
+    branch_row = episode.branch.row
+    prev_yk = float(world.history.states[branch_row][yk])
+    prev_nfe = float(world.history.params[branch_row][nfe])
     for t in range(min(len(episode), cap)):
         obs, _, terminated, truncated, info = env.step(policy(obs))
         if terminated:
             break
         state, actions = info["state"], info["actions"]
         for name in action_names:
-            series[name][i, t] = getattr(actions, name)
+            series[name][row, t] = getattr(actions, name)
         exog = episode.params[t]
-        series["growth"][i, t] = np.log(state.Yk / prev_yk) / world.dt
-        series["potential"][i, t] = exog[grpr] + np.log(exog[nfe] / prev_nfe) / world.dt
-        series["ER"][i, t] = state.ER
-        series["PI"][i, t] = state.PI
+        series["growth"][row, t] = np.log(state.Yk / prev_yk) / world.dt
+        series["potential"][row, t] = (
+            exog[grpr] + np.log(exog[nfe] / prev_nfe) / world.dt
+        )
+        series["ER"][row, t] = state.ER
+        series["PI"][row, t] = state.PI
         prev_yk, prev_nfe = state.Yk, float(exog[nfe])
         if truncated:
             break
