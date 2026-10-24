@@ -48,14 +48,13 @@ class LeadForm:
 class GensysForm:
     """Sims' canonical form, with one auxiliary variable per expectation."""
 
-    g0: np.ndarray
-    g1: np.ndarray
-    psi: np.ndarray
+    g0: np.ndarray  #: (n, n) coefficients on this period's extended vector
+    g1: np.ndarray  #: (n, n) coefficients on last period's
+    psi: np.ndarray  #: (n, n_shocks) loading on the innovations
     pi: np.ndarray  #: (n, n_eta) loading on the endogenous forecast errors
-    variables: tuple[
-        str, ...
-    ]  #: the model's variables, then the ``E[...]`` auxiliaries
-    shocks: tuple[str, ...]
+    #: the model's variables, then the ``E[...]`` auxiliaries
+    variables: tuple[str, ...]
+    shocks: tuple[str, ...]  #: column order of the innovations
 
 
 @dataclass
@@ -108,13 +107,8 @@ class LinearSystem:
         is a transcription slip and raises rather than being silently ignored.
         """
         cur, lag, lead, shock = cur or {}, lag or {}, lead or {}, shock or {}
-        for group, keys in (("variable", (*cur, *lag, *lead)), ("shock", tuple(shock))):
-            table = self._index if group == "variable" else self._shock_index
-            unknown = [k for k in keys if k not in table]
-            if unknown:
-                raise ValueError(
-                    f"equation {name!r}: unknown {group}(s) {sorted(unknown)}"
-                )
+        _check_known(name, "variable", (*cur, *lag, *lead), self._index)
+        _check_known(name, "shock", tuple(shock), self._shock_index)
         self._equations.append(
             _Equation(name, dict(cur), dict(lag), dict(lead), dict(shock), const)
         )
@@ -164,15 +158,10 @@ class LinearSystem:
         gf = np.zeros((n, n))
         psi = np.zeros((n, m))
         c = np.zeros(n)
+        self._fill_backward(g0, g1, psi)
         for row, eq in enumerate(self._equations):
-            for name, v in eq.cur.items():
-                g0[row, self._index[name]] += v
-            for name, v in eq.lag.items():
-                g1[row, self._index[name]] -= v
             for name, v in eq.lead.items():
                 gf[row, self._index[name]] -= v
-            for name, v in eq.shock.items():
-                psi[row, self._shock_index[name]] -= v
             c[row] -= eq.const
         return LeadForm(g0, g1, gf, psi, c, self.variables, self.shocks)
 
@@ -199,23 +188,12 @@ class LinearSystem:
         psi = np.zeros((total, m))
         pi = np.zeros((total, len(expected)))
 
+        self._fill_backward(g0, g1, psi)
         for row, eq in enumerate(self._equations):
-            for name, v in eq.cur.items():
-                g0[row, self._index[name]] += v
-            for name, v in eq.lag.items():
-                g1[row, self._index[name]] -= v
             for name, v in eq.lead.items():
                 g0[row, aux[name]] += v  # E_t x_{t+1} *is* the auxiliary, dated t
-            for name, v in eq.shock.items():
-                psi[row, self._shock_index[name]] -= v
 
-        # x_t = E[x]_{t-1} + eta_x: the auxiliary was last period's forecast, and
-        # the gap between it and the realisation is the forecast error.
-        for k, name in enumerate(expected):
-            row = n + k
-            g0[row, self._index[name]] = 1.0
-            g1[row, aux[name]] = 1.0
-            pi[row, k] = 1.0
+        self._fill_expectation_rows(g0, g1, pi, aux)
 
         return GensysForm(
             g0,
@@ -228,6 +206,40 @@ class LinearSystem:
 
     # -- internals ---------------------------------------------------------
 
+    def _fill_expectation_rows(
+        self,
+        g0: np.ndarray,
+        g1: np.ndarray,
+        pi: np.ndarray,
+        aux: Mapping[str, int],
+    ) -> None:
+        """Write the row defining each auxiliary ``E[x]``, at its own column.
+
+        ``x_t = E[x]_{t-1} + eta_x``: the auxiliary was last period's forecast,
+        and the gap between it and the realisation is the forecast error.
+        """
+        for k, (name, col) in enumerate(aux.items()):
+            g0[col, self._index[name]] = 1.0
+            g1[col, col] = 1.0
+            pi[col, k] = 1.0
+
+    def _fill_backward(self, g0: np.ndarray, g1: np.ndarray, psi: np.ndarray) -> None:
+        """Write every equation's current, lagged and shock terms into the matrices.
+
+        The part both forms share -- they differ only in where the expectations
+        go -- so it is stated once and the forms cannot disagree about it. The
+        lagged and shock terms change sign as they move to the right-hand side.
+        Expectation columns are disjoint from these, so the order the two are
+        filled in cannot change a single sum.
+        """
+        for row, eq in enumerate(self._equations):
+            for name, v in eq.cur.items():
+                g0[row, self._index[name]] += v
+            for name, v in eq.lag.items():
+                g1[row, self._index[name]] -= v
+            for name, v in eq.shock.items():
+                psi[row, self._shock_index[name]] -= v
+
     def _require_square(self) -> tuple[int, int]:
         """Check the system is exactly determined, naming the mismatch if not."""
         n, m = len(self.variables), len(self.shocks)
@@ -237,3 +249,12 @@ class LinearSystem:
                 f"{'missing' if len(self._equations) < n else 'too many'}"
             )
         return n, m
+
+
+def _check_known(
+    equation: str, group: str, keys: Sequence[str], table: Mapping[str, int]
+) -> None:
+    """Raise if any of ``keys`` is not a declared ``group`` -- a transcription slip."""
+    unknown = [k for k in keys if k not in table]
+    if unknown:
+        raise ValueError(f"equation {equation!r}: unknown {group}(s) {sorted(unknown)}")

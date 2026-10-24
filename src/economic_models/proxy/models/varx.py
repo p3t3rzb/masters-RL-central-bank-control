@@ -84,7 +84,11 @@ class VARXProxy(BaseProxyModel):
     # -- estimation ----------------------------------------------------------
 
     def _fit(self, data: FitData) -> None:
-        """Fit the standardized ridge regression; cache the residual covariance and its Cholesky factor for stochastic draws."""
+        """Fit the standardized ridge regression and its noise model.
+
+        Caches the residual covariance and its Cholesky factor for stochastic
+        draws, and the design precision :meth:`_leverage` reads.
+        """
         X = self._design(data.z, data.u_next)
         Y = data.y
 

@@ -4,7 +4,7 @@ A hyperparameter is only as good as the return it earns, and the return that
 matters is the one the **structural** model pays -- not a proxy's estimate of it.
 So the objective here is the plainest thing it could be: build the environment a
 dataset group describes, run the candidate policy through that group's futures
-with :func:`~control.dsac.train.evaluate`, and average over groups. The loss is
+with :func:`~control.dsac.evaluation.evaluate`, and average over groups. The loss is
 the negative of that, because optimisers minimise.
 
 Two properties of the arrangement are worth stating, because the whole protocol
@@ -38,7 +38,7 @@ import numpy as np
 
 from control.dataset import group_count, load_world
 from control.drivers import GroundTruthDriver
-from control.dsac.train import evaluate
+from control.dsac.evaluation import evaluate
 from control.env import CentralBankEnv, EnvConfig
 from control.rewards import MandateReward
 from control.world import TrainingWorld
@@ -201,7 +201,7 @@ def build_env(
     this repository: the instrument's speed is part of the *agent's* problem, and a
     rule stated in levels slowed to the agent's instrument would be a different
     rule than the one in the book. See
-    :func:`~control.dsac.train.free_instrument`.
+    :func:`~control.dsac.policies.free_instrument`.
     """
     return CentralBankEnv(
         GroundTruthDriver(world, iterations=config.iterations),
@@ -231,7 +231,7 @@ def score_group(
     """Score one candidate on one economy: the atom of every number here.
 
     Loads the group (cached per process), asks the policy for its observer and its
-    built form, and hands both to :func:`~control.dsac.train.evaluate` over the
+    built form, and hands both to :func:`~control.dsac.evaluation.evaluate` over the
     group's whole bank. ``repeats`` stays at one because the ground truth is a
     deterministic solver -- a second roll of the same future would agree exactly.
     """

@@ -59,6 +59,10 @@ _MAX_BINDING = 40
 #: not to converge -- which is a collapse, not a solver setting to raise.
 _MAX_OCCBIN_ITERATIONS = 20
 
+#: How far below the bound a rate must be to count as binding, so a rate the
+#: constrained solve pinned *at* the bound is not read back as violating it.
+_BINDING_TOLERANCE = 1e-10
+
 
 class LowerBoundNotResolved(ModelStepFailure):
     """The regime sequence at the lower bound would not settle.
@@ -302,7 +306,8 @@ class LinearREEconomicModel(BaseEconomicModel):
         shadow = self._shadow_rate(path, y_prev, z, lead)
         realised = path[:, self._bound_variable]
         binding = (
-            np.where(np.arange(len(path)) < guessed, shadow, realised) < level - 1e-10
+            np.where(np.arange(len(path)) < guessed, shadow, realised)
+            < level - _BINDING_TOLERANCE
         )
         hit = np.flatnonzero(binding)
         return int(hit[-1]) + 1 if hit.size else 0

@@ -26,11 +26,14 @@ from typing import Self
 
 import numpy as np
 import torch
-from sklearn.preprocessing import StandardScaler
 from torch import nn
 
 from economic_models._torch import resolve_device
-from economic_models.encoders.base import GenerativeEncoder
+from economic_models.encoders.base import GenerativeEncoder, _StandardizedFeatures
+
+#: Residual std assigned to a feature the head fits exactly, so a stochastic
+#: forecast never draws a degenerate (zero-width) noise term for it.
+_RESID_STD_FLOOR = 1e-6
 
 
 @dataclass
@@ -44,6 +47,30 @@ class _Belief:
 
     h: np.ndarray  # (num_layers, hidden)
     c: np.ndarray  # (num_layers, hidden)
+
+
+def _pad_runs(
+    runs: list[tuple[np.ndarray, np.ndarray]], dy: int, ku: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Pad standardized ``(f, u)`` runs to one length for a single batched pass.
+
+    Returns ``(X, Y_next, U_next, mask)``: the ``(n, Tmax, dy+ku)`` LSTM inputs,
+    the ``(n, Tmax-1, .)`` next-step targets and their exog, and the
+    ``(n, Tmax-1)`` mask over each run's ``T-1`` real targets.
+    """
+    Tmax = max(len(Y) for Y, _ in runs)
+    n = len(runs)
+    X = np.zeros((n, Tmax, dy + ku), dtype=np.float32)
+    Y_next = np.zeros((n, Tmax - 1, dy), dtype=np.float32)
+    U_next = np.zeros((n, Tmax - 1, ku), dtype=np.float32)
+    mask = np.zeros((n, Tmax - 1), dtype=np.float32)
+    for i, (Y, Uc) in enumerate(runs):
+        L = len(Y)
+        X[i, :L] = np.hstack([Y, Uc])
+        Y_next[i, : L - 1] = Y[1:]
+        U_next[i, : L - 1] = Uc[1:]
+        mask[i, : L - 1] = 1.0
+    return X, Y_next, U_next, mask
 
 
 class _PredictiveLSTM(nn.Module):
@@ -98,7 +125,7 @@ class _PredictiveLSTM(nn.Module):
         return self.head(torch.cat([h, u_next], dim=-1))
 
 
-class LSTMEncoder(GenerativeEncoder):
+class LSTMEncoder(_StandardizedFeatures, GenerativeEncoder):
     """A nonlinear recurrent (LSTM) predictive-filter state encoder."""
 
     def __init__(
@@ -140,10 +167,6 @@ class LSTMEncoder(GenerativeEncoder):
         self.device = resolve_device(device)
 
         self.net_: _PredictiveLSTM | None = None
-        # Column standardisers for the observations (f) and exog inputs (u),
-        # fit on the pooled features by :meth:`fit`.
-        self._y_scaler: StandardScaler | None = None
-        self._u_scaler: StandardScaler | None = None
         # Per-feature predictive residual std in standardized space, for stochastic
         # forecasts -- the LSTM's analogue of the Kalman encoder's predictive
         # observation covariance.
@@ -162,22 +185,7 @@ class LSTMEncoder(GenerativeEncoder):
         """Hard floor of feature rows needed to warm-start a belief."""
         return self._min_window
 
-    # -- standardisation ----------------------------------------------------
-
-    def _sy(self, F: np.ndarray) -> np.ndarray:
-        """Column-standardise observation rows ``F``."""
-        assert self._y_scaler is not None
-        return self._y_scaler.transform(F)
-
-    def _su(self, U: np.ndarray) -> np.ndarray:
-        """Column-standardise exog input rows ``U``."""
-        assert self._u_scaler is not None
-        return self._u_scaler.transform(U)
-
-    def _inv_y(self, Y: np.ndarray) -> np.ndarray:
-        """Map standardised observations ``Y`` back to original feature units."""
-        assert self._y_scaler is not None
-        return self._y_scaler.inverse_transform(Y)
+    # -- tensors ------------------------------------------------------------
 
     def _t(self, A: np.ndarray) -> torch.Tensor:
         """Convert an array to a float32 tensor on the encoder's device."""
@@ -190,50 +198,39 @@ class LSTMEncoder(GenerativeEncoder):
         if self.seed is not None:
             torch.manual_seed(self.seed)
 
-        Fall = np.vstack([F for F, _ in feature_runs])
-        Uall = np.vstack([U for _, U in feature_runs])
-        self._y_scaler = StandardScaler().fit(Fall)
-        self._u_scaler = StandardScaler().fit(Uall)
-        dy, ku = Fall.shape[1], Uall.shape[1]
+        F_all, U_all = self._fit_scalers(feature_runs)
+        dy, ku = F_all.shape[1], U_all.shape[1]
 
         # Only runs with at least one transition contribute training pairs.
         runs = [(self._sy(F), self._su(U)) for F, U in feature_runs if len(F) >= 2]
         if not runs:
             raise ValueError("LSTMEncoder.fit needs at least one run of length >= 2")
-
-        # Pad the standardized (f, u) sequences to a common length and build a mask
-        # over the T-1 next-step targets of each run.
-        lengths = np.array([len(Y) for Y, _ in runs])
-        Tmax = int(lengths.max())
-        n = len(runs)
-        X = np.zeros((n, Tmax, dy + ku), dtype=np.float32)
-        Ytgt = np.zeros((n, Tmax - 1, dy), dtype=np.float32)
-        Unext = np.zeros((n, Tmax - 1, ku), dtype=np.float32)
-        mask = np.zeros((n, Tmax - 1), dtype=np.float32)
-        for i, (Y, Uc) in enumerate(runs):
-            L = len(Y)
-            X[i, :L] = np.hstack([Y, Uc])
-            Ytgt[i, : L - 1] = Y[1:]
-            Unext[i, : L - 1] = Uc[1:]
-            mask[i, : L - 1] = 1.0
-
-        Xt, Ytt = self._t(X), self._t(Ytgt)
-        Unt, mt = self._t(Unext), self._t(mask)
+        X, Y_next, U_next, mask = _pad_runs(runs, dy, ku)
+        Xt, Unt = self._t(X), self._t(U_next)
 
         self.net_ = _PredictiveLSTM(
             dy, ku, self._m, self.num_layers, self.head_hidden, self.dropout
         ).to(self.device)
+        self._train(Xt, self._t(Y_next), Unt, self._t(mask))
+        self._record_resid_std(Xt, Unt, Y_next, mask)
+        self._fitted = True
+        return self
+
+    def _train(
+        self, Xt: torch.Tensor, Yt: torch.Tensor, Unt: torch.Tensor, mt: torch.Tensor
+    ) -> None:
+        """Full-batch Adam on the masked next-step squared error, per epoch."""
+        assert self.net_ is not None
         opt = torch.optim.Adam(
             self.net_.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
-
         self.loss_ = []
         self.net_.train()
         for _ in range(self.epochs):
             opt.zero_grad()
             H, _ = self.net_.encode(Xt)  # (n, Tmax, m)
             pred = self.net_.read(H[:, :-1, :], Unt)  # (n, Tmax-1, dy)
-            sq = ((pred - Ytt) ** 2).sum(dim=-1) * mt
+            sq = ((pred - Yt) ** 2).sum(dim=-1) * mt
             loss = sq.sum() / mt.sum()
             loss.backward()
             if self.grad_clip is not None:
@@ -241,28 +238,54 @@ class LSTMEncoder(GenerativeEncoder):
             opt.step()
             self.loss_.append(float(loss.detach()))
 
-        # Record per-feature predictive residual std for stochastic forecasts.
+    def _record_resid_std(
+        self, Xt: torch.Tensor, Unt: torch.Tensor, Y_next: np.ndarray, mask: np.ndarray
+    ) -> None:
+        """Record the per-feature predictive residual std for stochastic forecasts."""
+        assert self.net_ is not None
         self.net_.eval()
         with torch.no_grad():
             H, _ = self.net_.encode(Xt)
             fitted = self.net_.read(H[:, :-1, :], Unt).cpu().numpy()
-        m3 = mask[:, :, None].astype(bool)
-        resid = (Ytgt - fitted)[np.broadcast_to(m3, Ytgt.shape)].reshape(-1, dy)
+        observed = np.broadcast_to(mask[:, :, None].astype(bool), Y_next.shape)
+        resid = (Y_next - fitted)[observed].reshape(-1, Y_next.shape[-1])
         self._resid_std = resid.std(axis=0)
-        self._resid_std[self._resid_std == 0] = 1e-6
-        self._fitted = True
-        return self
+        self._resid_std[self._resid_std == 0] = _RESID_STD_FLOOR
+
+    # -- running the trained network ----------------------------------------
+
+    def _encode(
+        self,
+        F: np.ndarray,
+        U: np.ndarray,
+        state: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """Run the LSTM over raw feature rows ``(F, U)``, from ``state`` if given."""
+        X = np.hstack([self._sy(F), self._su(U)])[None, :, :]
+        assert self.net_ is not None
+        self.net_.eval()
+        with torch.no_grad():
+            return self.net_.encode(self._t(X), state)
+
+    def _read(self, H: np.ndarray, U_next: np.ndarray) -> np.ndarray:
+        """Standardized head forecast from hidden rows ``H`` and raw next exog."""
+        h, u = self._t(H), self._t(self._su(U_next))
+        assert self.net_ is not None
+        self.net_.eval()
+        with torch.no_grad():
+            return self.net_.read(h, u).cpu().numpy()
+
+    @staticmethod
+    def _to_belief(h: torch.Tensor, c: torch.Tensor) -> _Belief:
+        """Detach the single sequence's ``(h, c)`` into a numpy belief."""
+        return _Belief(h=h[:, 0, :].cpu().numpy(), c=c[:, 0, :].cpu().numpy())
 
     # -- batch encode -------------------------------------------------------
 
     def encode_run(self, F: np.ndarray, U: np.ndarray) -> np.ndarray:
         """Causal hidden-state latent per period for one run, ``(len(F), m)``."""
         self._require_fitted()
-        X = np.hstack([self._sy(F), self._su(U)])[None, :, :]
-        assert self.net_ is not None
-        self.net_.eval()
-        with torch.no_grad():
-            H, _ = self.net_.encode(self._t(X))
+        H, _ = self._encode(F, U)
         return H[0].cpu().numpy()
 
     # -- online -------------------------------------------------------------
@@ -270,34 +293,23 @@ class LSTMEncoder(GenerativeEncoder):
     def init_belief(self, F_win: np.ndarray, U_win: np.ndarray) -> _Belief:
         """Warm-start the ``(h, c)`` state by running the LSTM over the window."""
         self._require_fitted()
-        X = np.hstack([self._sy(F_win), self._su(U_win)])[None, :, :]
-        assert self.net_ is not None
-        self.net_.eval()
-        with torch.no_grad():
-            _, (h, c) = self.net_.encode(self._t(X))
-        return _Belief(h=h[:, 0, :].cpu().numpy(), c=c[:, 0, :].cpu().numpy())
+        _, (h, c) = self._encode(F_win, U_win)
+        return self._to_belief(h, c)
 
     def latent(self, belief: _Belief) -> np.ndarray:
         """Return the top layer's hidden state as the conditioning latent."""
-        # The top layer's hidden state is the conditioning latent.
         return belief.h[-1].copy()
 
     def advance(
         self, belief: _Belief, f_next: np.ndarray, u_next: np.ndarray
     ) -> _Belief:
         """Fold one realised ``(f_next, u_next)`` in via one LSTM step."""
-        x = np.hstack([self._sy(f_next[None, :]), self._su(u_next[None, :])])[
-            None, :, :
-        ]
         state = (
             self._t(belief.h)[:, None, :].contiguous(),
             self._t(belief.c)[:, None, :].contiguous(),
         )
-        assert self.net_ is not None
-        self.net_.eval()
-        with torch.no_grad():
-            _, (h, c) = self.net_.encode(self._t(x), state)
-        return _Belief(h=h[:, 0, :].cpu().numpy(), c=c[:, 0, :].cpu().numpy())
+        _, (h, c) = self._encode(f_next[None, :], u_next[None, :], state)
+        return self._to_belief(h, c)
 
     # -- generative forecast ------------------------------------------------
 
@@ -308,12 +320,7 @@ class LSTMEncoder(GenerativeEncoder):
         rng: np.random.Generator | None = None,
     ) -> np.ndarray:
         """One-step head forecast from the belief; a draw if ``rng`` is given."""
-        h = self._t(belief.h[-1][None, :])
-        u = self._t(self._su(u_next[None, :]))
-        assert self.net_ is not None
-        self.net_.eval()
-        with torch.no_grad():
-            y = self.net_.read(h, u).cpu().numpy()[0]
+        y = self._read(belief.h[-1][None, :], u_next[None, :])[0]
         if rng is not None:
             y = y + self._resid_std * rng.standard_normal(y.shape[0])
         return self._inv_y(y[None, :])[0]
@@ -325,10 +332,4 @@ class LSTMEncoder(GenerativeEncoder):
         the raw exog features of each target period; returns the deterministic head
         forecast in original feature units.
         """
-        h = self._t(Z)
-        u = self._t(self._su(U_next))
-        assert self.net_ is not None
-        self.net_.eval()
-        with torch.no_grad():
-            Ystd = self.net_.read(h, u).cpu().numpy()
-        return self._inv_y(Ystd)
+        return self._inv_y(self._read(Z, U_next))

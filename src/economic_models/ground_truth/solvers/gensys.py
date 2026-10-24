@@ -186,6 +186,7 @@ def _ordered_qz(
         cutoff = _adaptive_div(g0, g1)
 
     def stable(alpha: np.ndarray, beta: np.ndarray) -> np.ndarray:
+        """Which generalized eigenvalues ``beta/alpha`` lie inside ``cutoff``."""
         return np.abs(beta) <= cutoff * np.abs(alpha)
 
     aa, bb, alpha, beta, qs, zs = ordqz(g0, g1, sort=stable, output="complex")

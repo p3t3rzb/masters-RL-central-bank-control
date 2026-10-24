@@ -31,7 +31,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from control.dsac.train import Policy, taylor_policy
+from control.dsac.policies import Policy, taylor_policy
 from control.env import CentralBankEnv
 from control.observation import Observer
 from control.tuning.space import Real, SearchSpace

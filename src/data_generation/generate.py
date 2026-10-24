@@ -36,7 +36,7 @@ from __future__ import annotations
 import argparse
 import time
 from concurrent.futures import as_completed
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 
 import numpy as np
 
@@ -212,13 +212,6 @@ def generate_dataset(config: DatasetConfig, *, verbose: bool = True) -> dict:
     and returns it. The manifest records the config, the interface column order
     and a per-group summary, so the dataset is self-describing on disk.
     """
-    interface = ground_truth(config.model).interface
-    State, Parameters, Actions = (
-        interface.state,
-        interface.parameters,
-        interface.actions,
-    )
-
     tasks = plan_tasks(config)
     workers = min(config.resolved_workers(), len(tasks))
     if verbose:
@@ -233,7 +226,7 @@ def generate_dataset(config: DatasetConfig, *, verbose: bool = True) -> dict:
     start = time.perf_counter()
     results = _run_groups(config, tasks, workers, verbose=verbose)
     elapsed = time.perf_counter() - start
-    manifest = _build_manifest(config, results, elapsed, State, Parameters, Actions)
+    manifest = _build_manifest(config, results, elapsed)
     storage.write_manifest(config.output_dir, manifest)
     if verbose:
         collapsed = sum(r.main_collapsed for r in results)
@@ -290,28 +283,16 @@ def _report(result: _GroupResult, done: int, total: int) -> None:
 
 
 def _build_manifest(
-    config: DatasetConfig,
-    results: list[_GroupResult],
-    elapsed: float,
-    State,
-    Parameters,
-    Actions,
+    config: DatasetConfig, results: list[_GroupResult], elapsed: float
 ) -> dict:
     """Assemble the self-describing dataset manifest from the finished groups."""
+    interface = ground_truth(config.model).interface
     excitation = _build_generator(config).config
     by_split: dict[str, list[dict]] = {"train": [], "test": []}
     for result in sorted(results, key=lambda r: (r.split, r.index)):
-        by_split[result.split].append(
-            {
-                "index": result.index,
-                "main_length": result.main_length,
-                "main_collapsed": result.main_collapsed,
-                "n_scenarios": result.n_scenarios,
-                "scenario_length": result.scenario_length,
-                "dampened_steps": result.dampened_steps,
-                "resamples": result.resamples,
-            }
-        )
+        # The split is the list the summary is filed under, not a field of it.
+        summary = {k: v for k, v in asdict(result).items() if k != "split"}
+        by_split[result.split].append(summary)
     return {
         "config": storage.config_to_dict(config),
         # Per group: a fully-simulated main run (states/params/actions/hidden), the
@@ -326,9 +307,9 @@ def _build_manifest(
             "scenario": "Scenario: params, hidden (+ diagnostics); no states/actions",
         },
         "columns": {
-            "states": list(State.names()),
-            "params": list(Parameters.names()),
-            "actions": list(Actions.names()),
+            "states": list(interface.state.names()),
+            "params": list(interface.parameters.names()),
+            "actions": list(interface.actions.names()),
             "hidden": list(excitation.hidden_names),
         },
         "splits": {
@@ -441,9 +422,9 @@ def main(argv: list[str] | None = None) -> None:
     """CLI entry point: parse arguments and generate the dataset.
 
     An interrupt is reported and exits 130 rather than unwinding as a traceback:
-    the pool has already been torn down by then (:func:`_worker_pool`), and the
-    groups written so far stay on disk -- only the manifest, which describes the
-    dataset as a whole, is not written.
+    the pool has already been torn down by then (:func:`~parallel.managed_pool`),
+    and the groups written so far stay on disk -- only the manifest, which
+    describes the dataset as a whole, is not written.
     """
     config = _parse_args(argv)
     try:

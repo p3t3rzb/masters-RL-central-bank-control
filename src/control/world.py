@@ -55,6 +55,15 @@ from economic_models.run import Run, Scenario
 #: The excitation presets a world may be built with.
 EXCITATIONS = ("default", "calm", "realistic")
 
+#: Width of the block of seeds one world seed owns. Futures are seeded from the
+#: block's start, so two world seeds never share a future.
+_SEED_BLOCK = 1_000_000
+#: Offset into a world's seed block of the seeds that redraw each deployment
+#: future's economy (:meth:`WorldConfig.deploy_configs`) -- far enough in that the
+#: future seeds below it never reach it, so the economies do not move when the
+#: number of futures does.
+_DEPLOY_ECONOMY_SEEDS = 900_000
+
 
 @dataclass(frozen=True)
 class WorldConfig:
@@ -230,7 +239,7 @@ class WorldConfig:
         if self.deploy_jitter <= 0.0:
             return [preset] * self.n_deploy_futures
         jitter = ExcitationJitter().scaled(self.deploy_jitter)
-        base = self.seed * 1_000_000 + 900_000
+        base = self.seed * _SEED_BLOCK + _DEPLOY_ECONOMY_SEEDS
         return [
             preset.perturbed(np.random.default_rng(base + j), jitter)
             for j in range(self.n_deploy_futures)
@@ -506,21 +515,11 @@ def build_world(
     n_futures = n_offline + config.n_deploy_futures
     # Disjoint seed blocks: the first block trains, the next evaluates, the tail
     # deploys, and all three are a deterministic function of ``config.seed``.
-    base = config.seed * 1_000_000
+    base = config.seed * _SEED_BLOCK
     seeds = [base + 1 + j for j in range(n_futures)]
-    # The deployment bank is the only one that may break: reconfiguring at the
-    # branch leaves every future forking from the same drift under new weather.
-    deploy_configs = config.deploy_configs()
-    configs = (
-        None if deploy_configs is None else [None] * n_offline + list(deploy_configs)
-    )
-    # Dealt round-robin rather than in contiguous blocks, so that any prefix of
-    # the training bank is spread over every start point -- a bank truncated for
-    # a short run is then still a multi-start bank.
     rows = start_rows(config)
     end = config.history_steps - 1
-    branch_at = [rows[j % len(rows)] for j in range(config.n_train_futures)]
-    branch_at += [end] * (n_futures - config.n_train_futures)
+    branch_at = _branch_rows(config, rows, n_futures)
 
     if verbose:
         print(
@@ -534,7 +533,7 @@ def build_world(
         branch_at=branch_at,
         seed=config.seed,
         continuation_seeds=seeds,
-        continuation_configs=configs,
+        continuation_configs=_continuation_configs(config, n_offline),
     )
     branch = captures[end].state
     branches = [BranchPoint(row=t, state=captures[t].state) for t in branch_at]
@@ -544,29 +543,7 @@ def build_world(
             f"(seed={config.seed}); pick another seed or a calmer excitation"
         )
     if verbose:
-        jittered = (
-            f", each redrawn at jitter {config.deploy_jitter:g}"
-            if config.deploy_jitter
-            else ""
-        )
-        deployed = (
-            ""
-            if not config.n_deploy_futures
-            else f" / {config.n_deploy_futures} deploy futures "
-            f"({config.deploy_excitation or config.excitation} excitation"
-            f"{jittered})"
-        )
-        started = (
-            ""
-            if len(rows) == 1
-            else f" from {len(rows)} start rows (history {rows[0]}..{rows[-1]})"
-        )
-        print(
-            f"world: history of {len(history)} steps "
-            f"({history.dampened_steps} dampened), "
-            f"{config.n_train_futures} train{started} / {config.n_eval_futures} "
-            f"eval futures{deployed}"
-        )
+        _print_world(config, history, rows)
 
     terminal = BranchPoint(row=end, state=branch)
     return TrainingWorld(
@@ -589,6 +566,64 @@ def build_world(
         ),
         hidden_names=excitation.hidden_names,
         config=config,
+    )
+
+
+def _branch_rows(
+    config: WorldConfig, rows: tuple[int, ...], n_futures: int
+) -> list[int]:
+    """The history row each of the ``n_futures`` futures forks from, in bank order.
+
+    Training futures are dealt round-robin over the start ``rows`` rather than in
+    contiguous blocks, so that any prefix of the training bank is spread over
+    every start point -- a bank truncated for a short run is then still a
+    multi-start bank. Every other future forks off the history's end.
+    """
+    end = config.history_steps - 1
+    branch_at = [rows[j % len(rows)] for j in range(config.n_train_futures)]
+    branch_at += [end] * (n_futures - config.n_train_futures)
+    return branch_at
+
+
+def _continuation_configs(
+    config: WorldConfig, n_offline: int
+) -> list[ExcitationConfig | None] | None:
+    """Per-future excitation overrides, or ``None`` when every future is plain.
+
+    The deployment bank is the only one that may break: reconfiguring at the
+    branch leaves every future forking from the same drift under new weather, so
+    the ``n_offline`` training and evaluation futures keep the world's preset.
+    """
+    deploy_configs = config.deploy_configs()
+    if deploy_configs is None:
+        return None
+    return [None] * n_offline + list(deploy_configs)
+
+
+def _print_world(config: WorldConfig, history: Run, rows: tuple[int, ...]) -> None:
+    """Print the one-line summary of a freshly built world."""
+    jittered = (
+        f", each redrawn at jitter {config.deploy_jitter:g}"
+        if config.deploy_jitter
+        else ""
+    )
+    deployed = (
+        ""
+        if not config.n_deploy_futures
+        else f" / {config.n_deploy_futures} deploy futures "
+        f"({config.deploy_excitation or config.excitation} excitation"
+        f"{jittered})"
+    )
+    started = (
+        ""
+        if len(rows) == 1
+        else f" from {len(rows)} start rows (history {rows[0]}..{rows[-1]})"
+    )
+    print(
+        f"world: history of {len(history)} steps "
+        f"({history.dampened_steps} dampened), "
+        f"{config.n_train_futures} train{started} / {config.n_eval_futures} "
+        f"eval futures{deployed}"
     )
 
 

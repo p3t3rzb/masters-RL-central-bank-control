@@ -69,7 +69,10 @@ class DRFProxy(BaseProxyModel):
     # -- estimation ----------------------------------------------------------
 
     def _fit(self, data: FitData) -> None:
-        """Grow the multi-output forest and cache per-tree leaf-membership maps for fast DRF weighting."""
+        """Grow the multi-output forest and cache per-tree leaf membership.
+
+        The membership maps are what make a DRF weighting a few lookups per step.
+        """
         X = self._design(data.z, data.u_next)
         Y = data.y
 
@@ -106,14 +109,15 @@ class DRFProxy(BaseProxyModel):
         """Nonzero DRF weights ``(indices, weights)`` for one query row ``x``."""
         assert self.forest_ is not None and self._leaf_members is not None
         query_leaves = self.forest_.apply(x[None, :])[0]  # (n_trees,)
-        acc: dict[int, float] = {}
+        weight_by_row: dict[int, float] = {}
         for members, leaf in zip(self._leaf_members, query_leaves):
             rows = members[int(leaf)]
-            w = 1.0 / (len(query_leaves) * len(rows))
+            share = 1.0 / (len(query_leaves) * len(rows))
             for i in rows:
-                acc[int(i)] = acc.get(int(i), 0.0) + w
-        idx = np.fromiter(acc.keys(), dtype=int, count=len(acc))
-        wts = np.fromiter(acc.values(), dtype=float, count=len(acc))
+                weight_by_row[int(i)] = weight_by_row.get(int(i), 0.0) + share
+        n = len(weight_by_row)
+        idx = np.fromiter(weight_by_row.keys(), dtype=int, count=n)
+        wts = np.fromiter(weight_by_row.values(), dtype=float, count=n)
         return idx, wts
 
     # -- inference -----------------------------------------------------------

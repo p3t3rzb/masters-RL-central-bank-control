@@ -7,7 +7,7 @@ exogenous spending, which leans against the employment shortfall, and the labour
 force and energy prices, which are random walks in levels rather than deviations.
 
 :class:`SwRunGenerator` is the model-specific end of the shared machinery in
-:mod:`economic_models.ground_truth.excitation.base`: it builds the model, makes
+:mod:`economic_models.ground_truth.excitation.generator`: it builds the model, makes
 the process, and says what feedback the process reads off the last period.
 
 The one addition GROWTH does not need is the redraw at the top of
@@ -27,16 +27,22 @@ from typing import Any
 
 import numpy as np
 
-from economic_models.ground_truth.excitation.base import (
+from economic_models.ground_truth.excitation.generator import (
     DrivenModel,
-    ExcitationProcess,
     ExcitedRunGenerator,
 )
+from economic_models.ground_truth.excitation.process import ExcitationProcess
 from economic_models.ground_truth.models.smets_wouters.calibration import SwCalibration
 from economic_models.ground_truth.models.smets_wouters.excitation.presets import (
     SwExcitationConfig,
 )
-from economic_models.ground_truth.models.smets_wouters.model import SwModel
+from economic_models.ground_truth.models.smets_wouters.excitation.specs import (
+    _EMPLOYMENT_SS,
+)
+from economic_models.ground_truth.models.smets_wouters.model import (
+    HIDDEN_SHOCKS,
+    SwModel,
+)
 from economic_models.ground_truth.models.smets_wouters.variables import (
     SwActions,
     SwParameters,
@@ -71,7 +77,7 @@ class SwExcitationProcess(ExcitationProcess):
         response leans against.
         """
         config = self._config
-        employment = 0.95 if feedback is None else float(feedback)
+        employment = _EMPLOYMENT_SS if feedback is None else float(feedback)
 
         self._spending_gap, _ = self._gap_spec.advance(
             self._spending_gap,
@@ -142,7 +148,7 @@ class SwRunGenerator(ExcitedRunGenerator):
     def _model_baselines(self) -> Mapping[str, float]:
         """Baseline value of everything the excitation drifts around."""
         baselines = dict(self.calibration.baselines())
-        baselines.update({name: 0.0 for name in _SHOCKS})
+        baselines.update({name: 0.0 for name in HIDDEN_SHOCKS})
         return baselines
 
     def _build_model(self) -> SwModel:
@@ -167,7 +173,7 @@ class SwRunGenerator(ExcitedRunGenerator):
         The response is put back at rollout, against the employment rate that
         actually happens -- see the stabiliser in :mod:`control.world`.
         """
-        return 0.95
+        return _EMPLOYMENT_SS
 
     # -- drawing an economy ------------------------------------------------
 
@@ -192,7 +198,3 @@ class SwRunGenerator(ExcitedRunGenerator):
             f"no determinate economy in {_MAX_DRAWS} draws at "
             f"sample_economy={self.sample_economy}"
         )
-
-
-#: The hidden disturbances, as the excitation names them.
-_SHOCKS = ("shock_a", "shock_b", "shock_i", "shock_p", "shock_w")

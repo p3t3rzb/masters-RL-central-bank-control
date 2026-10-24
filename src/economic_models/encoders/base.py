@@ -23,6 +23,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Self
 
 import numpy as np
+from sklearn.preprocessing import StandardScaler
 
 
 class StateEncoder(ABC):
@@ -138,6 +139,43 @@ class GenerativeEncoder(StateEncoder):
         latents :meth:`~StateEncoder.encode_run` returns and the target
         periods' exog features; returns one predicted feature row per input row.
         """
+
+
+class _StandardizedFeatures:
+    """Column standardisers for the observations (``f``) and exog inputs (``u``).
+
+    Both learned encoders work in column-standardized ``(f, u)`` space, so the
+    scalers, their pooled fit and the three conversions live here once rather
+    than being restated, line for line, in each encoder.
+    """
+
+    _y_scaler: StandardScaler | None = None
+    _u_scaler: StandardScaler | None = None
+
+    def _fit_scalers(
+        self, feature_runs: list[tuple[np.ndarray, np.ndarray]]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Fit both standardisers on the pooled runs; return the pooled ``(F, U)``."""
+        F_all = np.vstack([F for F, _ in feature_runs])
+        U_all = np.vstack([U for _, U in feature_runs])
+        self._y_scaler = StandardScaler().fit(F_all)
+        self._u_scaler = StandardScaler().fit(U_all)
+        return F_all, U_all
+
+    def _sy(self, F: np.ndarray) -> np.ndarray:
+        """Column-standardise observation rows ``F``."""
+        assert self._y_scaler is not None
+        return self._y_scaler.transform(F)
+
+    def _su(self, U: np.ndarray) -> np.ndarray:
+        """Column-standardise exog input rows ``U``."""
+        assert self._u_scaler is not None
+        return self._u_scaler.transform(U)
+
+    def _inv_y(self, Y: np.ndarray) -> np.ndarray:
+        """Map standardised observations ``Y`` back to original feature units."""
+        assert self._y_scaler is not None
+        return self._y_scaler.inverse_transform(Y)
 
 
 class NullEncoder(StateEncoder):

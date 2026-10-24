@@ -147,6 +147,7 @@ class _Names:
     """The variable names of one of the two economies, sticky or flexible."""
 
     def __init__(self, flexible: bool) -> None:
+        """Name the sticky economy's variables, or with ``flexible`` their ``f`` twins."""
         s = "f" if flexible else ""
         self.tag = "flex_" if flexible else ""
         self.y, self.c, self.inv, self.q = f"y{s}", f"c{s}", f"inv{s}", f"q{s}"

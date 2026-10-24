@@ -55,6 +55,14 @@ _LONG_HORIZON = 40
 #: The effective lower bound on the annualised nominal policy rate.
 _ELB = 0.0
 
+#: Converts an annualised fraction to the percent-per-quarter the log-linearised
+#: model is written in.
+_TO_QUARTERLY_PERCENT = 100.0 / 4.0
+
+#: Lower bound on a level before it is divided by or logged, so a degenerate draw
+#: surfaces as an extreme value rather than as a division-by-zero crash.
+_FLOOR = 1e-9
+
 #: How strongly the tax share leans against the debt ratio each quarter. Small
 #: enough to leave the observed debt path plenty of life, large enough that it
 #: does not wander away over a long run. The model is Ricardian, so this is a rule
@@ -91,6 +99,10 @@ HIDDEN_SHOCKS: Mapping[str, str] = {
 #: in the level of output and nothing else -- which is exactly the kind of thing
 #: bit-for-bit branching tests exist to catch.
 _LEVELS: tuple[str, ...] = ("Yk", "P", "Ck", "Ik", "Wk", "labour_force", "GD")
+
+#: Prefix marking last period's value of a deviation or level in the flat state
+#: record -- the one piece of history the next step's growth rates are taken from.
+_PREVIOUS = "prev_"
 
 
 class SwModel(LinearREEconomicModel):
@@ -143,12 +155,19 @@ class SwModel(LinearREEconomicModel):
         self._y_previous = np.zeros(len(VARIABLES))
         self._state = self._observe()
         self._solutions.append(self._record())
+        self._apply_overrides(param_overrides)
 
-        if param_overrides:
-            unknown = set(param_overrides) - self._exogenous_names()
-            if unknown:
-                raise ValueError(f"not visible parameters: {sorted(unknown)}")
-            self._exogenous.update({k: float(v) for k, v in param_overrides.items()})
+    def _apply_overrides(self, overrides: Mapping[str, float]) -> None:
+        """Set constructor ``overrides`` on the visible exogenous inputs.
+
+        Applied after seeding, so an override always wins over the calibration,
+        and restricted to visible names, so a typo raises instead of silently
+        creating an input nothing reads.
+        """
+        unknown = set(overrides) - self._exogenous_names()
+        if unknown:
+            raise ValueError(f"not visible parameters: {sorted(unknown)}")
+        self._exogenous.update({k: float(v) for k, v in overrides.items()})
 
     # -- the visible interface ---------------------------------------------
 
@@ -236,7 +255,6 @@ class SwModel(LinearREEconomicModel):
         enters the consumption equation rather than as a rate.
         """
         p, x = self.params, self._exogenous
-        to_quarterly = 100.0 / 4.0
         base = self.calibration.exogenous_baselines
         return np.array(
             [
@@ -246,12 +264,12 @@ class SwModel(LinearREEconomicModel):
                 self._shocks["shock_i"],
                 self._shocks["shock_p"],
                 self._shocks["shock_w"],
-                float(x["Rdev"]) * to_quarterly,
-                float(x["PIstar"]) * to_quarterly - p.pi_bar,
-                float(x["QE"]) * to_quarterly * p.c3,
+                float(x["Rdev"]) * _TO_QUARTERLY_PERCENT,
+                float(x["PIstar"]) * _TO_QUARTERLY_PERCENT - p.pi_bar,
+                float(x["QE"]) * _TO_QUARTERLY_PERCENT * p.c3,
                 (float(x["theta"]) - float(base["theta"])) * 100.0,
                 100.0
-                * math.log(max(float(x["Penergy"]), 1e-9) / float(base["Penergy"])),
+                * math.log(max(float(x["Penergy"]), _FLOOR) / float(base["Penergy"])),
             ]
         )
 
@@ -261,7 +279,7 @@ class SwModel(LinearREEconomicModel):
             return None
         replacement = np.zeros(len(VARIABLES))
         replacement[self._bound_variable] = 1.0
-        level = _ELB * 100.0 / 4.0 - self.params.r_ss
+        level = _ELB * _TO_QUARTERLY_PERCENT - self.params.r_ss
         return self._policy_row, level, replacement
 
     @property
@@ -283,7 +301,7 @@ class SwModel(LinearREEconomicModel):
         drift in it is not just forcing: it moves the economy the bank is trying
         to learn, and the solution has to be recomputed to match.
         """
-        target = float(self._exogenous["GRpr"]) * 100.0 / 4.0
+        target = float(self._exogenous["GRpr"]) * _TO_QUARTERLY_PERCENT
         if not math.isclose(target, self.params.gamma_bar, rel_tol=0.0, abs_tol=1e-12):
             self.params = self.params.with_values({"gamma_bar": target})
 
@@ -316,7 +334,7 @@ class SwModel(LinearREEconomicModel):
         y, y_prev = self._y, self._y_previous
         trend = self.params.gamma_bar / 100.0
         nfe = float(self._exogenous["Nfe"])
-        head = math.log(max(nfe, 1e-9) / max(self._levels["labour_force"], 1e-9))
+        head = math.log(max(nfe, _FLOOR) / max(self._levels["labour_force"], _FLOOR))
 
         for level, variable in (("Yk", "y"), ("Ck", "c"), ("Ik", "inv")):
             change = (y[self._index[variable]] - y_prev[self._index[variable]]) / 100.0
@@ -341,7 +359,7 @@ class SwModel(LinearREEconomicModel):
         for reasons having nothing to do with the economy.
         """
         nominal = self._levels["Yk"] * self._levels["P"] / 100.0
-        debt_ratio = self._levels["GD"] / max(nominal, 1e-9)
+        debt_ratio = self._levels["GD"] / max(nominal, _FLOOR)
         base = self.calibration.exogenous_baselines
         tax = (
             self.params.g_y
@@ -412,12 +430,14 @@ class SwModel(LinearREEconomicModel):
         record = {name: float(self._y[i]) for i, name in enumerate(VARIABLES)}
         record.update(
             {
-                f"prev_{name}": float(self._y_previous[i])
+                f"{_PREVIOUS}{name}": float(self._y_previous[i])
                 for i, name in enumerate(VARIABLES)
             }
         )
         record.update({name: float(value) for name, value in self._levels.items()})
-        record.update({f"prev_{name}": float(v) for name, v in self._previous.items()})
+        record.update(
+            {f"{_PREVIOUS}{name}": float(v) for name, v in self._previous.items()}
+        )
         record.update({name: float(v) for name, v in self._exogenous.items()})
         record.update({name: float(v) for name, v in self._shocks.items()})
         record.update(
@@ -439,17 +459,33 @@ class SwModel(LinearREEconomicModel):
                 self._shocks[name] = value
             elif name in self.params.__dataclass_fields__:
                 deep[name] = value
-            elif name in self._exogenous:
-                self._exogenous[name] = value
-            elif name in self._index:
-                self._y[self._index[name]] = value
-            elif name.startswith("prev_") and name[5:] in self._index:
-                self._y_previous[self._index[name[5:]]] = value
-            elif name in self._levels:
-                self._levels[name] = value
-            elif name.startswith("prev_") and name[5:] in self._levels:
-                self._previous[name[5:]] = value
-            elif name == "PSBR":
-                self._psbr = value
+            elif name.startswith(_PREVIOUS):
+                self._restore_previous(name.removeprefix(_PREVIOUS), value)
+            else:
+                self._restore_current(name, value)
+        # Collected and applied at once: ``with_values`` rebuilds the parameter
+        # set, which is worth doing once per restore rather than once per name.
         if deep:
             self.params = self.params.with_values(deep)
+
+    def _restore_current(self, name: str, value: float) -> None:
+        """Set this period's exogenous input, deviation, level or deficit ``name``.
+
+        A name belonging to none of them is not this model's state and is
+        ignored, so a mapping recorded with extra diagnostics restores cleanly.
+        """
+        if name in self._exogenous:
+            self._exogenous[name] = value
+        elif name in self._index:
+            self._y[self._index[name]] = value
+        elif name in self._levels:
+            self._levels[name] = value
+        elif name == "PSBR":
+            self._psbr = value
+
+    def _restore_previous(self, name: str, value: float) -> None:
+        """Set last period's deviation or level ``name`` (recorded as ``prev_<name>``)."""
+        if name in self._index:
+            self._y_previous[self._index[name]] = value
+        elif name in self._levels:
+            self._previous[name] = value

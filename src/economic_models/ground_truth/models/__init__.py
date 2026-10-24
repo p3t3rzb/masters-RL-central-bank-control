@@ -2,8 +2,8 @@
 
 Every model here subclasses :class:`PysolveEconomicModel` and brings its own
 state/parameter/action variables, calibration, model-specific
-:class:`~economic_models.ground_truth.excitation.base.ExcitationConfig` and
-:class:`~economic_models.ground_truth.excitation.base.ExcitedRunGenerator`
+:class:`~economic_models.ground_truth.excitation.process.ExcitationConfig` and
+:class:`~economic_models.ground_truth.excitation.generator.ExcitedRunGenerator`
 specialisations. The model-agnostic machinery they build on lives one level up,
 in :mod:`economic_models.ground_truth.base` and
 :mod:`economic_models.ground_truth.excitation`. GROWTH is the one implemented so

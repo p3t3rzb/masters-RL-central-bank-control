@@ -21,11 +21,11 @@ same names:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
-from economic_models.ground_truth.excitation.base import ExcitationConfig
+from economic_models.ground_truth.excitation.process import ExcitationConfig
 from economic_models.ground_truth.excitation.specs import (
     AR1Spec,
     ClimateSpec,
@@ -45,9 +45,8 @@ from economic_models.ground_truth.models.smets_wouters.excitation.specs import (
 class SwExcitationConfig(ExcitationConfig):
     """Excitation of the Smets-Wouters economy, with its two model-specific drivers."""
 
-    gov_spending: (
-        SpendingSpec  #: the exogenous spending disturbance and its fiscal reflex
-    )
+    #: the exogenous spending disturbance and its fiscal reflex
+    gov_spending: SpendingSpec
     labour_force: RandomWalkSpec  #: demographics
     energy: RandomWalkSpec  #: the observed cost-push driver
 
@@ -55,16 +54,7 @@ class SwExcitationConfig(ExcitationConfig):
         self, rng: np.random.Generator, jitter: ExcitationJitter
     ) -> SwExcitationConfig:
         """A neighbouring economy: the model-specific specs perturbed alongside the rest."""
-        return SwExcitationConfig(
-            visible=self.visible,
-            hidden=self.hidden,
-            volatility=self.volatility,
-            crisis=self.crisis,
-            climate=self.climate,
-            gov_spending=self.gov_spending.perturbed(rng, jitter),
-            labour_force=self.labour_force,
-            energy=self.energy,
-        )
+        return replace(self, gov_spending=self.gov_spending.perturbed(rng, jitter))
 
     # -- presets -----------------------------------------------------------
 
@@ -75,8 +65,8 @@ class SwExcitationConfig(ExcitationConfig):
             visible=_visible(),
             hidden=_hidden(),
             gov_spending=_SPENDING,
-            labour_force=RandomWalkSpec(sigma=0.004, max_logdev=0.06),
-            energy=RandomWalkSpec(sigma=0.05, max_logdev=0.20),
+            labour_force=_LABOUR_FORCE,
+            energy=_ENERGY,
         )
 
     @classmethod
@@ -91,8 +81,8 @@ class SwExcitationConfig(ExcitationConfig):
             visible=_visible(),
             hidden=_hidden(wide=False),
             gov_spending=_SPENDING,
-            labour_force=RandomWalkSpec(sigma=0.004, max_logdev=0.06),
-            energy=RandomWalkSpec(sigma=0.05, max_logdev=0.20),
+            labour_force=_LABOUR_FORCE,
+            energy=_ENERGY,
         )
 
     @classmethod
@@ -120,7 +110,7 @@ class SwExcitationConfig(ExcitationConfig):
             gov_spending=SpendingSpec(
                 gap_sigma=0.60, gap_clip=2.5, stabilizer=0.7, bounds=(-3.0, 4.0)
             ),
-            labour_force=RandomWalkSpec(sigma=0.004, max_logdev=0.06),
+            labour_force=_LABOUR_FORCE,
             energy=RandomWalkSpec(sigma=0.07, max_logdev=0.30),
         )
 
@@ -142,6 +132,12 @@ class SwExcitationConfig(ExcitationConfig):
 _SPENDING = SpendingSpec(
     gap_sigma=0.50, gap_clip=2.0, stabilizer=0.5, bounds=(-2.5, 3.0)
 )
+
+#: Demographics: the labour force wanders slowly, the same in every preset.
+_LABOUR_FORCE = RandomWalkSpec(sigma=0.004, max_logdev=0.06)
+
+#: Energy prices in calm weather; ``realistic`` gives them a wider, faster walk.
+_ENERGY = RandomWalkSpec(sigma=0.05, max_logdev=0.20)
 
 
 def _visible(*, wide: bool = False) -> dict[str, AR1Spec]:

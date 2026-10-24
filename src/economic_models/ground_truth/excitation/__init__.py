@@ -8,10 +8,10 @@ datasets. GROWTH's own subclasses live in
 :mod:`economic_models.ground_truth.models.growth.excitation`.
 """
 
-from economic_models.ground_truth.excitation.base import (
+from economic_models.ground_truth.excitation.generator import ExcitedRunGenerator
+from economic_models.ground_truth.excitation.process import (
     ExcitationConfig,
     ExcitationProcess,
-    ExcitedRunGenerator,
 )
 from economic_models.ground_truth.excitation.specs import (
     AR1Spec,

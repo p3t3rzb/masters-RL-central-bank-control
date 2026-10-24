@@ -14,7 +14,7 @@ state and a bank of futures; a :class:`~control.world.TrainingWorld` *is* a
 history, a branch state and a bank of futures. So nothing in the control stack has
 to learn about ``data/``: this module composes the pieces
 :func:`~data_generation.storage.load_run` and friends return into the world the
-environment, the drivers and :func:`~control.dsac.train.evaluate` already speak,
+environment, the drivers and :func:`~control.dsac.evaluation.evaluate` already speak,
 and a group off disk drives them unchanged.
 
 What the dataset cannot store, the manifest identifies: the fiscal stabilizer and
@@ -98,7 +98,7 @@ def load_world(
     itself: the divide is between groups, and it is the dataset's own directory
     split. Anything scoring a policy here therefore asks for the ``"eval"`` split
     of the environment, which is what
-    :func:`~control.dsac.train.build_truth_env` defaults to.
+    :func:`~control.dsac.builders.build_truth_env` defaults to.
 
     The returned :attr:`~control.world.TrainingWorld.config` describes the group
     faithfully except for ``n_train_futures``, which is one because
