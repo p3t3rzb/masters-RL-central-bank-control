@@ -13,7 +13,7 @@ loss, the risk measure the actor optimises) reads that vector rather than a mean
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 import numpy as np
 import torch
@@ -61,7 +61,9 @@ class SquashedGaussianPolicy(nn.Module):
         mu, log_std = self.body(obs).chunk(2, dim=-1)
         return mu, log_std.clamp(_LOG_STD_MIN, _LOG_STD_MAX)
 
-    def sample(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def sample(
+        self, obs: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """A reparameterised action, its log-density, and the greedy action.
 
         The log-density carries the ``tanh`` change-of-variables correction
@@ -123,9 +125,10 @@ class GainCorrectedPolicy(SquashedGaussianPolicy):
     a hope about optimiser step sizes.
     """
 
-    def __init__(
-        self, base: SquashedGaussianPolicy, features: Sequence[int]
-    ) -> None:
+    #: The observation channels the gain reads, registered as a buffer.
+    features: torch.Tensor
+
+    def __init__(self, base: SquashedGaussianPolicy, features: Sequence[int]) -> None:
         """Wrap ``base``, reading observation columns ``features``.
 
         ``base``'s parameters are frozen in place -- the caller's optimiser is

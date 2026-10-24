@@ -34,11 +34,18 @@ def _world_and_next_row(model: str):
     spec = MODELS[model]
     dt = spec.fixed_dt or 1.0
     config = WorldConfig(
-        model=model, dt=dt, history_steps=HISTORY, horizon=4,
-        n_train_futures=1, n_eval_futures=1, excitation="default",
+        model=model,
+        dt=dt,
+        history_steps=HISTORY,
+        horizon=4,
+        n_train_futures=1,
+        n_eval_futures=1,
+        excitation="default",
     )
     world = build_world(config, verbose=False)
-    generator = spec.generator(config.excitation_config(), dt=dt, on_collapse="truncate")
+    generator = spec.generator(
+        config.excitation_config(), dt=dt, on_collapse="truncate"
+    )
     longer = generator.generate(HISTORY + 1, seed=config.seed)
     return world, longer
 

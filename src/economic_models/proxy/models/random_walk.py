@@ -71,8 +71,7 @@ class RandomWalkProxy(BaseProxyModel):
         """Persistence: predict the current feature row unchanged."""
         return f_prev  # persistence: predict the current feature row
 
-    def _sample_step(
-        self, ctx: StepContext, rng: np.random.Generator
-    ) -> np.ndarray:
+    def _sample_step(self, ctx: StepContext, rng: np.random.Generator) -> np.ndarray:
         """One draw: the current row plus correlated feature-change noise."""
+        assert self._chol is not None
         return ctx.f_prev + self._chol @ rng.standard_normal(len(ctx.f_prev))

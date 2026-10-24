@@ -27,10 +27,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from control.live.residual import NullResidual, Residual, design
 from economic_models.proxy import BaseProxyModel, FitData, RolloutState, StepContext
 from economic_models.variables import State
-
-from control.live.residual import NullResidual, Residual, design
 
 
 @dataclass(frozen=True)
@@ -61,9 +60,13 @@ class CorrectedProxy(BaseProxyModel):
         stateless-after-fitting components, and two copies of a filter would be
         two filters that could disagree.
         """
-        super().__init__(proxy.interface, encoder=proxy.encoder, transform=proxy.transform)
+        super().__init__(
+            proxy.interface, encoder=proxy.encoder, transform=proxy.transform
+        )
         self.proxy = proxy
-        self.residual = residual or NullResidual(len(self.transform.state_feature_names))
+        self.residual = residual or NullResidual(
+            len(self.transform.state_feature_names)
+        )
         self._depth = 0
         #: predictive variance of the step just taken, per state feature.
         #:
@@ -116,9 +119,7 @@ class CorrectedProxy(BaseProxyModel):
         rows = design(z, u_next, f_prev)
         return base + np.vstack([self.residual.correction(row) for row in rows])
 
-    def _sample_step(
-        self, ctx: StepContext, rng: np.random.Generator
-    ) -> np.ndarray:
+    def _sample_step(self, ctx: StepContext, rng: np.random.Generator) -> np.ndarray:
         """One corrected draw; reached only through :meth:`_predict_step`."""
         return self._predict_step(ctx, rng)
 

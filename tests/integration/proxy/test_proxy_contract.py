@@ -8,7 +8,7 @@ A new estimator is covered by adding one line to :data:`FACTORIES`.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import pytest
@@ -28,11 +28,17 @@ from economic_models.proxy import (
 #: Every proxy family, at the smallest size that still fits.
 FACTORIES: dict[str, Callable[[], BaseProxyModel]] = {
     "varx": lambda: VARXProxy(GROWTH_INTERFACE, encoder=KalmanEncoder(latent_dim=3)),
-    "drf": lambda: DRFProxy(GROWTH_INTERFACE, n_estimators=20, encoder=KalmanEncoder(latent_dim=3)),
+    "drf": lambda: DRFProxy(
+        GROWTH_INTERFACE, n_estimators=20, encoder=KalmanEncoder(latent_dim=3)
+    ),
     "knn": lambda: KNNProxy(GROWTH_INTERFACE, k=5, encoder=KalmanEncoder(latent_dim=3)),
-    "mdn": lambda: MDNProxy(GROWTH_INTERFACE, epochs=50, hidden=16, encoder=KalmanEncoder(latent_dim=3)),
+    "mdn": lambda: MDNProxy(
+        GROWTH_INTERFACE, epochs=50, hidden=16, encoder=KalmanEncoder(latent_dim=3)
+    ),
     "random-walk": lambda: RandomWalkProxy(GROWTH_INTERFACE),
-    "encoder-native": lambda: EncoderNativeProxy(GROWTH_INTERFACE, encoder=KalmanEncoder(latent_dim=3)),
+    "encoder-native": lambda: EncoderNativeProxy(
+        GROWTH_INTERFACE, encoder=KalmanEncoder(latent_dim=3)
+    ),
 }
 
 HORIZON = 10
@@ -115,7 +121,9 @@ def test_mean_rollout_is_repeatable(proxy, drive):
     """Without an ``rng`` a rollout is the conditional mean, every time."""
     window, params, actions, _ = drive
     np.testing.assert_allclose(
-        proxy.rollout(window, params, actions), proxy.rollout(window, params, actions), rtol=1e-12
+        proxy.rollout(window, params, actions),
+        proxy.rollout(window, params, actions),
+        rtol=1e-12,
     )
 
 
@@ -135,7 +143,9 @@ def test_advance_is_the_mean_step(proxy, drive):
     proxy.reset(*window)
     advanced = proxy.advance(*inputs)
     proxy.reset(*window)
-    np.testing.assert_allclose(_levels(advanced), _levels(proxy.step(*inputs)), rtol=1e-12)
+    np.testing.assert_allclose(
+        _levels(advanced), _levels(proxy.step(*inputs)), rtol=1e-12
+    )
 
 
 def test_predict_mean_is_what_step_would_take(proxy, drive):

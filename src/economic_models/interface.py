@@ -27,7 +27,9 @@ class TransformSpec:
     """
 
     state_names: tuple[str, ...]  #: endogenous columns, aligned with the State space
-    exog_names: tuple[str, ...]  #: exogenous columns, aligned with Parameters then Actions
+    exog_names: tuple[
+        str, ...
+    ]  #: exogenous columns, aligned with Parameters then Actions
     #: state columns entered as one-step log-differences (growth rates per step)
     log_diff: tuple[str, ...]
     #: state columns entered as a ratio to the ``denominator`` column

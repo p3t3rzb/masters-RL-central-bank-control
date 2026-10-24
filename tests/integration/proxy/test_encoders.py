@@ -10,12 +10,17 @@ against the batch path the encoder is fit through.
 from __future__ import annotations
 
 import copy
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import pytest
 
-from economic_models.encoders import KalmanEncoder, LSTMEncoder, NullEncoder, StateEncoder
+from economic_models.encoders import (
+    KalmanEncoder,
+    LSTMEncoder,
+    NullEncoder,
+    StateEncoder,
+)
 from economic_models.ground_truth import GROWTH_INTERFACE
 from economic_models.proxy import StationarizingTransform
 

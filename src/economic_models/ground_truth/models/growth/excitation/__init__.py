@@ -23,7 +23,9 @@ from economic_models.ground_truth.models.growth.excitation.generator import (
     GrowthExcitationProcess,
     GrowthRunGenerator,
 )
-from economic_models.ground_truth.models.growth.excitation.presets import GrowthExcitationConfig
+from economic_models.ground_truth.models.growth.excitation.presets import (
+    GrowthExcitationConfig,
+)
 from economic_models.ground_truth.models.growth.excitation.specs import GovSpendingSpec
 from economic_models.run import Run
 

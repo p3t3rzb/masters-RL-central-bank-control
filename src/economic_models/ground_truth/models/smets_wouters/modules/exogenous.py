@@ -96,9 +96,13 @@ def add_exogenous_block(system: LinearSystem, p: SwParams) -> None:
     # The two mark-ups follow ARMA(1,1): the moving-average term captures the
     # high-frequency fluctuations a pure AR(1) leaves in the residuals. Carrying
     # last period's innovation as a state is what makes the MA term expressible.
-    system.exogenous("eps_p", rho=p.rho_p, shock="z_p", ma="eta_p_lag", ma_weight=p.mu_p)
+    system.exogenous(
+        "eps_p", rho=p.rho_p, shock="z_p", ma="eta_p_lag", ma_weight=p.mu_p
+    )
     system.add("eta_p_lag", cur={"eta_p_lag": 1.0}, shock={"z_p": -1.0})
-    system.exogenous("eps_w", rho=p.rho_w, shock="z_w", ma="eta_w_lag", ma_weight=p.mu_w)
+    system.exogenous(
+        "eps_w", rho=p.rho_w, shock="z_w", ma="eta_w_lag", ma_weight=p.mu_w
+    )
     system.add("eta_w_lag", cur={"eta_w_lag": 1.0}, shock={"z_w": -1.0})
 
     # The announced objective is permanent -- anything less would make a target

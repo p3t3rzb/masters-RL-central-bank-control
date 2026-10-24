@@ -186,9 +186,7 @@ class BaseProxyModel(BaseEconomicModel):
         """
 
     @abstractmethod
-    def _sample_step(
-        self, ctx: StepContext, rng: np.random.Generator
-    ) -> np.ndarray:
+    def _sample_step(self, ctx: StepContext, rng: np.random.Generator) -> np.ndarray:
         """One stochastic one-step draw from the fitted noise model."""
 
     def _predict_step(
@@ -202,9 +200,9 @@ class BaseProxyModel(BaseEconomicModel):
         exception -- it forecasts from the belief itself).
         """
         if rng is None:
-            return self._predict_batch(
-                ctx.z[None], ctx.u_next[None], ctx.f_prev[None]
-            )[0]
+            return self._predict_batch(ctx.z[None], ctx.u_next[None], ctx.f_prev[None])[
+                0
+            ]
         return self._sample_step(ctx, rng)
 
     # -- the estimator, addressable from outside a rollout -------------------
@@ -371,7 +369,7 @@ class BaseProxyModel(BaseEconomicModel):
         residual draw from the fitted noise model is added. Requires a warm start:
         call :meth:`reset` (or :meth:`rollout`, which resets for you) first.
         """
-        if self._feat_prev is None:
+        if self._feat_prev is None or self._levels_prev is None:
             raise RuntimeError(
                 "proxy has no warm start; call reset() (or rollout(), which resets "
                 "for you) before step()/advance()"
@@ -382,9 +380,7 @@ class BaseProxyModel(BaseEconomicModel):
         levels = self._transform.invert_states(features, self._levels_prev)
         return self._advance_rollout(features, levels, ctx.u_next, exog_now)
 
-    def absorb(
-        self, state: State, parameters: Parameters, actions: Actions
-    ) -> None:
+    def absorb(self, state: State, parameters: Parameters, actions: Actions) -> None:
         """Fold a **realised** period into the rollout state, predicting nothing.
 
         The teacher-forced twin of :meth:`step`: it advances the belief, the
@@ -403,7 +399,11 @@ class BaseProxyModel(BaseEconomicModel):
         Requires a warm start, and (like :meth:`step`) that the realised levels
         keep the log-differenced columns strictly positive.
         """
-        if self._feat_prev is None:
+        if (
+            self._feat_prev is None
+            or self._levels_prev is None
+            or self._exog_prev is None
+        ):
             raise RuntimeError("proxy has no warm start; call reset() first")
         levels = np.array(
             [state.to_dict()[name] for name in self._transform.state_names], dtype=float
@@ -423,6 +423,7 @@ class BaseProxyModel(BaseEconomicModel):
 
     def _context(self, exog_now: np.ndarray) -> StepContext:
         """The conditioning context for a period driven by ``exog_now`` levels."""
+        assert self._feat_prev is not None and self._exog_prev is not None
         return StepContext(
             belief=self._belief,
             z=self._encoder.latent(self._belief),

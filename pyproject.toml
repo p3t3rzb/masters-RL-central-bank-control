@@ -16,7 +16,11 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "complexipy>=8.1.0",
+    "mypy>=2.4.0",
+    "pre-commit>=4.0",
     "pytest>=8.0",
+    "ruff>=0.17.2",
 ]
 
 [build-system]
@@ -36,3 +40,29 @@ markers = [
     "integration: real models and fitted proxies at small sizes (tests/integration)",
     "e2e: whole pipelines, training and dataset generation (tests/e2e)",
 ]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+# Long lines the formatter cannot split (strings, URLs, comments) are left alone.
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["economic_models", "data_generation", "control", "parallel"]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+module = ["pysolve.*", "scipy.*", "sklearn.*"]
+ignore_missing_imports = true
+
+[tool.complexipy]
+paths = ["src"]
+max-complexity-allowed = 15

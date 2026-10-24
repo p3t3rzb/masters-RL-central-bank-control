@@ -10,12 +10,12 @@ log-difference; everything already stationary passes through as its level.
 
 from __future__ import annotations
 
-from economic_models.interface import ModelInterface, TransformSpec
 from economic_models.ground_truth.models.growth.variables import (
     GrowthActions,
     GrowthParameters,
     GrowthState,
 )
+from economic_models.interface import ModelInterface, TransformSpec
 
 GROWTH_INTERFACE = ModelInterface(
     state=GrowthState,

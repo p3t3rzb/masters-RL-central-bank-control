@@ -33,14 +33,13 @@ from typing import Any
 
 import numpy as np
 
-from economic_models.interface import ModelInterface
-from economic_models.proxy import BaseProxyModel, RolloutState
-from economic_models.run import Run
-
 from control.dsac.replay import Batch
 from control.env import CentralBankEnv
 from control.observation import Observer
 from control.rewards import RewardContext, RewardFunction
+from economic_models.interface import ModelInterface
+from economic_models.proxy import BaseProxyModel, RolloutState
+from economic_models.run import Run
 
 
 @dataclass(frozen=True)
@@ -161,7 +160,9 @@ class RealBuffer:
         drift. ``None`` draws from everything, which is the behaviour when the
         split is off.
         """
-        usable = [i for i, b in enumerate(self._branches[: self._size]) if b is not None]
+        usable = [
+            i for i, b in enumerate(self._branches[: self._size]) if b is not None
+        ]
         if half is not None:
             usable = [i for i in usable if i % 2 == half]
         if not usable:
@@ -173,7 +174,7 @@ class RealBuffer:
         w = decay**age * self._weight[usable]
         idx = rng.choice(len(usable), size=n, p=w / w.sum())
         branches = self._branches
-        return [branches[usable[j]] for j in idx]  # type: ignore[misc]
+        return [branches[usable[j]] for j in idx]
 
     @property
     def rewards(self) -> np.ndarray:
@@ -226,9 +227,7 @@ def seed_from_run(
     # sitting exactly *on* a bound is legitimate and normalises to the same +-1 a
     # clipped one does. Only strictly outside is a mismatch.
     box = np.array([env.config.action_bounds[name] for name in action_names])
-    outside = int(
-        np.sum(np.any((actions < box[:, 0]) | (actions > box[:, 1]), axis=1))
-    )
+    outside = int(np.sum(np.any((actions < box[:, 0]) | (actions > box[:, 1]), axis=1)))
     if outside:
         raise ValueError(
             f"{outside} of {len(actions)} historic rows have a lever outside the "

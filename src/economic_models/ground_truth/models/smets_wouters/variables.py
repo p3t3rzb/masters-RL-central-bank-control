@@ -81,6 +81,10 @@ class SwActions(Actions):
     point per year whichever lever it belongs to.
     """
 
-    Rdev: float = _observable("Discretionary deviation from the policy rule, annualised")
+    Rdev: float = _observable(
+        "Discretionary deviation from the policy rule, annualised"
+    )
     PIstar: float = _observable("Announced inflation objective, annualised")
-    QE: float = _observable("Credit-easing wedge offsetting the risk premium, annualised")
+    QE: float = _observable(
+        "Credit-easing wedge offsetting the risk premium, annualised"
+    )

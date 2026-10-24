@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
+
 from economic_models.ground_truth.excitation.base import ExcitationConfig
 from economic_models.ground_truth.excitation.specs import (
     AR1Spec,
@@ -38,20 +40,20 @@ from economic_models.ground_truth.models.smets_wouters.excitation.specs import (
     from_quarterly,
 )
 
-import numpy as np
-
 
 @dataclass(frozen=True)
 class SwExcitationConfig(ExcitationConfig):
     """Excitation of the Smets-Wouters economy, with its two model-specific drivers."""
 
-    gov_spending: SpendingSpec  #: the exogenous spending disturbance and its fiscal reflex
+    gov_spending: (
+        SpendingSpec  #: the exogenous spending disturbance and its fiscal reflex
+    )
     labour_force: RandomWalkSpec  #: demographics
     energy: RandomWalkSpec  #: the observed cost-push driver
 
     def _perturb_model_specs(
         self, rng: np.random.Generator, jitter: ExcitationJitter
-    ) -> "SwExcitationConfig":
+    ) -> SwExcitationConfig:
         """A neighbouring economy: the model-specific specs perturbed alongside the rest."""
         return SwExcitationConfig(
             visible=self.visible,
@@ -67,7 +69,7 @@ class SwExcitationConfig(ExcitationConfig):
     # -- presets -----------------------------------------------------------
 
     @classmethod
-    def default(cls) -> "SwExcitationConfig":
+    def default(cls) -> SwExcitationConfig:
         """The estimated economy: the posterior's disturbances and nothing else."""
         return cls(
             visible=_visible(),
@@ -78,7 +80,7 @@ class SwExcitationConfig(ExcitationConfig):
         )
 
     @classmethod
-    def calm(cls) -> "SwExcitationConfig":
+    def calm(cls) -> SwExcitationConfig:
         """``default`` widened to the columns ``realistic`` records.
 
         A dataset has to have the same shape whichever preset drew it, so the
@@ -94,7 +96,7 @@ class SwExcitationConfig(ExcitationConfig):
         )
 
     @classmethod
-    def realistic(cls) -> "SwExcitationConfig":
+    def realistic(cls) -> SwExcitationConfig:
         """The world preset: volatility regimes, crises, and heterogeneous economies."""
         return cls(
             visible=_visible(wide=True),
@@ -137,7 +139,9 @@ class SwExcitationConfig(ExcitationConfig):
 #: not help but hurts: spending saturates its bounds, which is a permanent demand
 #: shock, which the rule answers by tightening, which lowers employment, which
 #: calls for more spending.
-_SPENDING = SpendingSpec(gap_sigma=0.50, gap_clip=2.0, stabilizer=0.5, bounds=(-2.5, 3.0))
+_SPENDING = SpendingSpec(
+    gap_sigma=0.50, gap_clip=2.0, stabilizer=0.5, bounds=(-2.5, 3.0)
+)
 
 
 def _visible(*, wide: bool = False) -> dict[str, AR1Spec]:

@@ -8,7 +8,9 @@ dividends and the lending mark-up).
 
 from pysolve.model import Model
 
-from economic_models.ground_truth.models.growth.modules.conventions import NOMINAL_YEAR_AGO
+from economic_models.ground_truth.models.growth.modules.conventions import (
+    NOMINAL_YEAR_AGO,
+)
 from economic_models.ground_truth.models.growth.variables import (
     GrowthActions,
     GrowthParameters,
@@ -84,16 +86,25 @@ def add_commercial_banks_equations(model: Model) -> None:
 
 def add_commercial_banks_params(model: Model) -> None:
     """Register the commercial banks' exogenous parameters onto ``model``."""
-    model.param("BANDlr", desc="Outer offset on the bank liquidity ratio band (top/bot)")
+    model.param(
+        "BANDlr", desc="Outer offset on the bank liquidity ratio band (top/bot)"
+    )
     model.param("betab", desc="Speed of adjustment of banks own funds")
     model.param("bot", desc="Bottom value for bank net liquidity ratio")
-    model.param("epsb", desc="Speed of adjustment in expected proportion of non-performing loans")
+    model.param(
+        "epsb",
+        desc="Speed of adjustment in expected proportion of non-performing loans",
+    )
     model.param("lambdab", desc="Parameter determining dividends of banks")
     model.param("NCAR", desc=_DESC["NCAR"])
     model.param("ro", desc=_DESC["ro"])
     model.param("top", desc="Top value for bank net liquidity ratio")
-    model.param("xim1", desc="Parameter in the equation for setting interest rate on deposits")
-    model.param("xim2", desc="Parameter in the equation for setting interest rate on deposits")
+    model.param(
+        "xim1", desc="Parameter in the equation for setting interest rate on deposits"
+    )
+    model.param(
+        "xim2", desc="Parameter in the equation for setting interest rate on deposits"
+    )
 
 
 def add_commercial_banks_variables(model: Model) -> None:

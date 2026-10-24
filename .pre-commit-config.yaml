@@ -1,0 +1,46 @@
+# Install once with `make hooks` (pre-commit + pre-push).
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+      - id: debug-statements
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.2
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      # Run from the project venv so mypy sees the real numpy/torch types.
+      - id: mypy
+        name: mypy
+        entry: uv run mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: complexipy
+        name: complexipy
+        entry: uv run complexipy -q
+        language: system
+        types: [python]
+        pass_filenames: false
+      - id: unit-tests
+        name: unit tests
+        entry: uv run pytest tests/unit -q
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

@@ -58,6 +58,7 @@ class KNNProxy(BaseProxyModel):
 
     def _standardize(self, X: np.ndarray) -> np.ndarray:
         """Column-wise standardize the design so the Euclidean metric is scale-fair."""
+        assert self._scaler is not None
         return self._scaler.transform(X)
 
     # -- estimation ----------------------------------------------------------
@@ -80,13 +81,13 @@ class KNNProxy(BaseProxyModel):
         self, z: np.ndarray, u_next: np.ndarray, f_prev: np.ndarray
     ) -> np.ndarray:
         """Conditional mean: the average target row of the ``k`` nearest neighbours."""
+        assert self.knn_ is not None and self._targets is not None
         _, idx = self.knn_.kneighbors(self._standardize(self._design(z, u_next)))
         return self._targets[idx].mean(axis=1)
 
-    def _sample_step(
-        self, ctx: StepContext, rng: np.random.Generator
-    ) -> np.ndarray:
+    def _sample_step(self, ctx: StepContext, rng: np.random.Generator) -> np.ndarray:
         """One draw: a whole target row of one uniformly chosen neighbour."""
+        assert self.knn_ is not None and self._targets is not None
         x = self._design(ctx.z[None, :], ctx.u_next[None, :])
         _, idx = self.knn_.kneighbors(self._standardize(x))
         return self._targets[rng.choice(idx[0])]

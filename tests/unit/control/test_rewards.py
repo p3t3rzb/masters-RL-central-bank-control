@@ -51,7 +51,9 @@ def test_on_target_every_leg_is_zero(context):
     """Full employment, potential growth and target inflation cost nothing."""
     reward = MandateReward()
     ctx = context()
-    assert reward.terms(ctx) == pytest.approx({"unemployment": 0.0, "growth": 0.0, "inflation": 0.0})
+    assert reward.terms(ctx) == pytest.approx(
+        {"unemployment": 0.0, "growth": 0.0, "inflation": 0.0}
+    )
     assert reward(ctx) == pytest.approx(0.0)
 
 
@@ -98,7 +100,10 @@ def test_weights_scale_their_own_leg(context):
 
 def test_employment_target_belongs_to_the_economy(context):
     """An economy resting below one is not charged for a gap no policy can close."""
-    assert MandateReward(employment_target=0.95).terms(context(er=0.95))["unemployment"] == 0.0
+    assert (
+        MandateReward(employment_target=0.95).terms(context(er=0.95))["unemployment"]
+        == 0.0
+    )
     assert MandateReward().terms(context(er=0.95))["unemployment"] < 0.0
 
 

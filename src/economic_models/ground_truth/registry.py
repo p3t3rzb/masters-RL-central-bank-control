@@ -20,11 +20,10 @@ package. A spec is a lookup table, not an abstraction layer.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
-from economic_models.base import BaseEconomicModel
-from economic_models.ground_truth.excitation.base import ExcitationConfig, ExcitedRunGenerator
+from economic_models.ground_truth.excitation.base import ExcitedRunGenerator
 from economic_models.ground_truth.models.growth import (
     GROWTH_INTERFACE,
     GrowthCalibration,
@@ -49,11 +48,19 @@ class GroundTruthSpec:
     """Everything the pipeline needs in order to run against one ground-truth model."""
 
     name: str  #: the name a config selects this model by
-    interface: ModelInterface  #: the value spaces and stationarisation a proxy is handed
-    model: type[BaseEconomicModel]  #: the structural model itself
-    generator: type[ExcitedRunGenerator]  #: draws excited runs and scenario continuations
-    excitation: type[ExcitationConfig]  #: the excitation family, whose presets are named
-    calibration: type  #: the calibration, whose ``baseline()`` gives the resting levers
+    interface: (
+        ModelInterface  #: the value spaces and stationarisation a proxy is handed
+    )
+    model: type[GrowthModel] | type[SwModel]  #: the structural model itself
+    generator: type[
+        ExcitedRunGenerator
+    ]  #: draws excited runs and scenario continuations
+    excitation: (
+        type[GrowthExcitationConfig] | type[SwExcitationConfig]
+    )  #: the excitation family, whose presets are named
+    calibration: (
+        type[GrowthCalibration] | type[SwCalibration]
+    )  #: the calibration, whose ``baseline()`` gives the resting levers
     excitations: tuple[str, ...]  #: the preset names this family offers
     #: The box the environment maps the agent's normalised action onto. Wider than
     #: the excitation's own bands, deliberately -- see :mod:`control.env`.
@@ -62,8 +69,12 @@ class GroundTruthSpec:
     #: shortfalls against. One for GROWTH, whose labour market clears at full
     #: employment; below one wherever a steady-state mark-up leaves slack.
     employment_target: float
-    er_bounds: tuple[float, float]  #: employment rates outside which the economy has collapsed
-    pi_bounds: tuple[float, float]  #: inflation rates outside which the economy has collapsed
+    er_bounds: tuple[
+        float, float
+    ]  #: employment rates outside which the economy has collapsed
+    pi_bounds: tuple[
+        float, float
+    ]  #: inflation rates outside which the economy has collapsed
     #: The lever a rule-based reference policy moves, and the response to the
     #: inflation gap that lever already owes before any tuned gain is added.
     #:
@@ -83,7 +94,9 @@ class GroundTruthSpec:
     #: cannot be rescaled, so it pins ``dt``.
     fixed_dt: float | None = None
 
-    def excitation_config(self, preset: str) -> ExcitationConfig:
+    def excitation_config(
+        self, preset: str
+    ) -> GrowthExcitationConfig | SwExcitationConfig:
         """The named preset of this model's excitation family."""
         if preset not in self.excitations:
             raise ValueError(

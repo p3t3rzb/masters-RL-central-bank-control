@@ -26,13 +26,23 @@ from __future__ import annotations
 
 import argparse
 import copy
+import io
 import sys
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, fields, replace
-from typing import Callable, Mapping
+from typing import Any, cast
 
 import numpy as np
 import torch
 
+from control.drivers import GroundTruthDriver, ModelDriver, ProxyDriver
+from control.dsac.agent import DSACAgent
+from control.dsac.replay import ReplayBuffer
+from control.dsac.risk import CVaRRisk, MeanRisk, RiskMeasure
+from control.env import CentralBankEnv, EnvConfig
+from control.observation import Observer
+from control.rewards import MandateReward, RewardFunction
+from control.world import Episode, TrainingWorld, WorldConfig, build_world
 from economic_models.encoders import (
     KalmanEncoder,
     LSTMEncoder,
@@ -49,15 +59,6 @@ from economic_models.proxy import (
     RandomWalkProxy,
     VARXProxy,
 )
-
-from control.dsac.agent import DSACAgent
-from control.dsac.replay import ReplayBuffer
-from control.dsac.risk import CVaRRisk, MeanRisk, RiskMeasure
-from control.drivers import GroundTruthDriver, ModelDriver, ProxyDriver
-from control.env import CentralBankEnv, EnvConfig
-from control.observation import Observer
-from control.rewards import MandateReward, RewardFunction
-from control.world import TrainingWorld, WorldConfig, build_world
 
 #: The proxy families this trainer can use as a world model.
 PROXIES = ("varx", "drf", "mdn", "knn", "random-walk")
@@ -383,9 +384,7 @@ def build_proxy(
     return RandomWalkProxy(interface)
 
 
-def build_obs_encoder(
-    name: str, *, latent: int = 10, seed: int = 0
-) -> StateEncoder:
+def build_obs_encoder(name: str, *, latent: int = 10, seed: int = 0) -> StateEncoder:
     """An unfitted state encoder for the observation's latent block.
 
     Deliberately a fresh instance rather than the proxy's, even where both are the
@@ -439,8 +438,15 @@ def build_env(
     seed: int,
 ) -> CentralBankEnv:
     """An environment over ``proxy`` drawing from the train or eval futures."""
-    return _env(ProxyDriver(proxy, world), world, observer, reward, config,
-                split=split, seed=seed)
+    return _env(
+        ProxyDriver(proxy, world),
+        world,
+        observer,
+        reward,
+        config,
+        split=split,
+        seed=seed,
+    )
 
 
 def build_truth_env(
@@ -470,8 +476,16 @@ def build_truth_env(
     which a deployment needs: it takes one future for hundreds of periods where
     training cut the bank into episodes of fifty.
     """
-    return _env(GroundTruthDriver(world), world, observer, reward, config,
-                split=split, seed=seed, horizon=horizon)
+    return _env(
+        GroundTruthDriver(world),
+        world,
+        observer,
+        reward,
+        config,
+        split=split,
+        seed=seed,
+        horizon=horizon,
+    )
 
 
 # -- policies ---------------------------------------------------------------
@@ -727,18 +741,10 @@ def evaluate(
     for i, episode in enumerate(episodes):
         returns = []
         for r in range(repeats):
-            obs, _ = env.reset(seed=seed + 10_000 * r + first + i, episode=episode)
-            reset_policy(policy)
-            total, steps = 0.0, 0
-            while True:
-                obs, reward, terminated, truncated, info = env.step(policy(obs))
-                total += reward
-                steps += 1
-                for name, value in info.get("reward_terms", {}).items():
-                    terms.setdefault(name, []).append(value)
-                if terminated or truncated:
-                    collapses += terminated
-                    break
+            total, steps, terminated = _score_episode(
+                env, policy, episode, seed + 10_000 * r + first + i, terms
+            )
+            collapses += terminated
             returns.append(total)
             lengths.append(steps)
             rolls += 1
@@ -755,6 +761,31 @@ def evaluate(
     }
     result.update({f"term_{k}": float(np.mean(v)) for k, v in terms.items()})
     return result
+
+
+def _score_episode(
+    env: CentralBankEnv,
+    policy: Policy,
+    episode: Episode,
+    seed: int,
+    terms: dict[str, list[float]],
+) -> tuple[float, int, bool]:
+    """Roll ``policy`` through ``episode`` once under ``seed``.
+
+    Returns ``(return, steps, terminated)`` and appends every step's reward
+    terms to ``terms``.
+    """
+    obs, _ = env.reset(seed=seed, episode=episode)
+    reset_policy(policy)
+    total, steps = 0.0, 0
+    while True:
+        obs, reward, terminated, truncated, info = env.step(policy(obs))
+        total += reward
+        steps += 1
+        for name, value in info.get("reward_terms", {}).items():
+            terms.setdefault(name, []).append(value)
+        if terminated or truncated:
+            return total, steps, terminated
 
 
 def rollout(
@@ -788,11 +819,7 @@ def rollout(
     A collapsed episode has no plausible state to record, so its row is ``NaN``
     from the collapse onwards and a column-wise average is over the survivors.
     """
-    world = env.driver.world
     action_names = env.interface.actions.names()
-    yk = env.interface.state.names().index("Yk")
-    nfe, grpr = (env.interface.parameters.names().index(n) for n in ("Nfe", "GRpr"))
-
     episodes = env.episodes.all()[first : first + n_episodes]
     if not episodes:
         raise ValueError(
@@ -810,29 +837,48 @@ def rollout(
         for name in (*action_names, "growth", "potential", "ER", "PI")
     }
     for i, episode in enumerate(episodes):
-        obs, _ = env.reset(seed=seed + first + i, episode=episode)
-        reset_policy(policy)
-        row = episode.branch.row
-        prev_yk = float(world.history.states[row][yk])
-        prev_nfe = float(world.history.params[row][nfe])
-        for t in range(min(len(episode), cap)):
-            obs, _, terminated, truncated, info = env.step(policy(obs))
-            if terminated:
-                break
-            state, actions = info["state"], info["actions"]
-            for name in action_names:
-                series[name][i, t] = getattr(actions, name)
-            exog = episode.params[t]
-            series["growth"][i, t] = np.log(state.Yk / prev_yk) / world.dt
-            series["potential"][i, t] = (
-                exog[grpr] + np.log(exog[nfe] / prev_nfe) / world.dt
-            )
-            series["ER"][i, t] = state.ER
-            series["PI"][i, t] = state.PI
-            prev_yk, prev_nfe = state.Yk, float(exog[nfe])
-            if truncated:
-                break
+        _record_episode(env, policy, episode, seed + first + i, cap, series, i)
     return series
+
+
+def _record_episode(
+    env: CentralBankEnv,
+    policy: Policy,
+    episode: Episode,
+    seed: int,
+    cap: int,
+    series: dict[str, np.ndarray],
+    i: int,
+) -> None:
+    """Roll ``policy`` through ``episode`` under ``seed``, filling row ``i`` of ``series``.
+
+    At most ``cap`` steps are rolled; the row is left ``NaN`` from a collapse on.
+    """
+    world = env.driver.world
+    action_names = env.interface.actions.names()
+    yk = env.interface.state.names().index("Yk")
+    nfe, grpr = (env.interface.parameters.names().index(n) for n in ("Nfe", "GRpr"))
+
+    obs, _ = env.reset(seed=seed, episode=episode)
+    reset_policy(policy)
+    row = episode.branch.row
+    prev_yk = float(world.history.states[row][yk])
+    prev_nfe = float(world.history.params[row][nfe])
+    for t in range(min(len(episode), cap)):
+        obs, _, terminated, truncated, info = env.step(policy(obs))
+        if terminated:
+            break
+        state, actions = info["state"], info["actions"]
+        for name in action_names:
+            series[name][i, t] = getattr(actions, name)
+        exog = episode.params[t]
+        series["growth"][i, t] = np.log(state.Yk / prev_yk) / world.dt
+        series["potential"][i, t] = exog[grpr] + np.log(exog[nfe] / prev_nfe) / world.dt
+        series["ER"][i, t] = state.ER
+        series["PI"][i, t] = state.PI
+        prev_yk, prev_nfe = state.Yk, float(exog[nfe])
+        if truncated:
+            break
 
 
 # -- training ---------------------------------------------------------------
@@ -895,12 +941,20 @@ def setup(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
             f"latent {observer.encoder.latent_dim})"
         )
 
-    env = build_env(proxy, world, observer, reward, config, split="train",
-                    seed=config.seed)
+    env = build_env(
+        proxy, world, observer, reward, config, split="train", seed=config.seed
+    )
     # A shallow copy shares the fitted estimator but keeps its own rollout state,
     # so evaluating mid-training cannot disturb the training environment.
-    eval_env = build_env(copy.copy(proxy), world, observer, reward, config,
-                         split="eval", seed=config.seed + 1)
+    eval_env = build_env(
+        copy.copy(proxy),
+        world,
+        observer,
+        reward,
+        config,
+        split="eval",
+        seed=config.seed + 1,
+    )
 
     agent = DSACAgent(
         env.obs_dim,
@@ -916,8 +970,13 @@ def setup(config: TrainConfig | None = None, *, verbose: bool = True) -> Trainin
         device=config.device,
     )
     return TrainingResult(
-        agent=agent, world=world, proxy=proxy, observer=observer,
-        env=env, eval_env=eval_env, config=config,
+        agent=agent,
+        world=world,
+        proxy=proxy,
+        observer=observer,
+        env=env,
+        eval_env=eval_env,
+        config=config,
     )
 
 
@@ -939,130 +998,29 @@ def train(
     """
     config = config or TrainConfig()
     result = setup(config, verbose=verbose) if result is None else result
-    observer = result.observer
-    env, eval_env, agent = result.env, result.eval_env, result.agent
+    env = result.env
 
     rng = np.random.default_rng(config.seed)
     buffer = ReplayBuffer(config.capacity, env.obs_dim, env.action_dim)
 
     explore = random_policy(env.action_dim, rng)
-    # The references act on a free instrument (see :func:`free_instrument`) --
-    # an environment of their own over the same futures under the same seed, so
-    # every comparison stays paired while only the agent is speed-constrained.
-    ref_env = build_env(copy.copy(result.proxy), result.world, observer,
-                        env.reward, free_instrument(config), split="eval",
-                        seed=config.seed + 1)
-    model = result.world.config.model
-    references: dict[str, Policy] = {
-        "random": explore,
-        "calibration": constant_policy(ref_env, calibration_actions(model)),
-        "taylor": taylor_policy(ref_env, observer, dt=config.dt,
-                                pi_target=config.pi_target, model=model),
-    }
+    ref_env, references = _references(result, config, explore)
     result.baselines_ = {
-        name: evaluate(ref_env, policy, config.eval_episodes,
-                       repeats=config.eval_repeats)
+        name: evaluate(
+            ref_env, policy, config.eval_episodes, repeats=config.eval_repeats
+        )
         for name, policy in references.items()
     }
     if verbose:
-        for name, scores in result.baselines_.items():
-            print(
-                f"baseline {name:>12}: return {scores['return']:9.1f} "
-                f"+- {scores['return_std']:7.1f}  "
-                f"collapse {scores['collapse_rate']:.0%}"
-            )
-        stored = config.total_steps * config.branch_k
-        print(
-            f"train: {config.total_steps} steps x {config.branch_k} draws "
-            f"= {stored} proxy draws "
-            f"({config.risk_measure().name} risk, device={agent.device})"
-        )
-        if stored > config.capacity:
-            print(
-                f"  note: {stored} transitions into a {config.capacity} buffer -- "
-                f"the oldest {stored - config.capacity} are evicted before the end"
-            )
+        _print_plan(result, config)
 
-    obs, _ = env.reset(seed=config.seed)
-    episode_return, episode_steps = 0.0, 0
-    episode_terms: dict[str, list[float]] = {}
-    stats: dict[str, float] = {}
-    best_agent: DSACAgent | None = None
-
-    for step in range(1, config.total_steps + 1):
-        action = explore(obs) if step <= config.warmup else agent.act(obs)
-        # Every draw of this transition is stored; only the last is followed, so
-        # the trajectory is unchanged and the buffer gains ``branch_k`` samples of
-        # the kernel at this state rather than one.
-        draws = env.branch_step(action, config.branch_k)
-        # What the instrument *applied* -- the effective step, which is the
-        # requested one only short of the box's edge (see
-        # :meth:`~control.env.CentralBankEnv.resolve_action`). Every draw from
-        # this position applied the same one; storing the request instead would
-        # pair a reward with an action that did not earn it.
-        applied = draws[-1].info.get("action", action)
-        # ``done`` marks a genuine terminal state only: a horizon truncation must
-        # still bootstrap, or the agent learns the world ends every episode.
-        for draw in draws:
-            buffer.add(obs, applied, draw.reward, draw.obs, draw.terminated)
-        next_obs, reward, terminated, truncated, info = draws[-1].as_step()
-        episode_return += reward
-        episode_steps += 1
-        for name, value in info.get("reward_terms", {}).items():
-            episode_terms.setdefault(name, []).append(value)
-        obs = next_obs
-
-        if terminated or truncated:
-            entry = {
-                "step": step,
-                "return": episode_return,
-                "length": episode_steps,
-                "collapsed": float(terminated),
-            }
-            entry.update(
-                {f"term_{k}": float(np.mean(v)) for k, v in episode_terms.items()}
-            )
-            result.episodes_.append(entry)
-            obs, _ = env.reset()
-            episode_return, episode_steps, episode_terms = 0.0, 0, {}
-
-        if step > config.warmup and len(buffer) >= config.batch:
-            for _ in range(config.updates_per_step):
-                stats = agent.update(buffer.sample(config.batch, rng))
-
-        if stats and step % config.log_every == 0:
-            result.updates_.append({"step": step, **stats})
-
-        if step % config.eval_every == 0 or step == config.total_steps:
-            scores = evaluate(
-                eval_env, agent_policy(agent), config.eval_episodes,
-                repeats=config.eval_repeats,
-            )
-            result.evals_.append({"step": step, **scores})
-            if config.restore_best and (
-                not result.best_ or scores["return"] > result.best_["return"]
-            ):
-                result.best_ = {"step": float(step), "return": scores["return"]}
-                best_agent = agent.clone()
-            if verbose:
-                recent = result.episodes_[-20:]
-                train_return = np.mean([e["return"] for e in recent]) if recent else np.nan
-                print(
-                    f"  [{step:>7}/{config.total_steps}] "
-                    f"train {train_return:9.1f} | eval {scores['return']:9.1f} "
-                    f"+- {scores['return_std']:7.1f} | "
-                    f"collapse {scores['collapse_rate']:.0%} | "
-                    f"alpha {stats.get('alpha', float('nan')):.3f}"
-                )
-            # The evaluation ran on a copy, but the training environment's own
-            # episode is mid-flight; leave it running.
+    best_agent = _train_loop(result, config, buffer, explore, rng, verbose=verbose)
 
     # Rewind to the best-scoring checkpoint *before* the final scoring, so the
     # headline, the figures and anything the caller goes on to deploy are all the
     # same agent -- the one that was kept, not the one training happened to end on.
     if best_agent is not None:
-        agent = best_agent
-        result.agent = agent
+        result.agent = best_agent
         if verbose and result.best_["step"] != config.total_steps:
             print(
                 f"restored the best checkpoint: step {result.best_['step']:.0f} "
@@ -1074,28 +1032,265 @@ def train(
     # so the spread across futures and the spread the proxy's own noise adds are
     # reported apart rather than summed into one misleading number.
     if config.final_repeats > 1:
-        if verbose:
-            print(
-                f"final scoring: {config.eval_episodes} futures x "
-                f"{config.final_repeats} rolls..."
-            )
-        scored = {"agent": (eval_env, agent_policy(agent))}
-        scored.update({name: (ref_env, policy) for name, policy in references.items()})
-        result.final_ = {
-            name: evaluate(scoring_env, policy, config.eval_episodes,
-                           repeats=config.final_repeats)
-            for name, (scoring_env, policy) in scored.items()
-        }
-        if verbose:
-            for name, scores in result.final_.items():
-                print(
-                    f"  {name:>12}: {scores['return']:9.1f} "
-                    f"+- {scores['return_std']:6.1f} across futures, "
-                    f"+- {scores['noise_std']:6.1f} from proxy noise "
-                    f"| collapse {scores['collapse_rate']:.0%}"
-                )
+        _final_scoring(result, config, ref_env, references, verbose=verbose)
 
     return result
+
+
+def _train_loop(
+    result: TrainingResult,
+    config: TrainConfig,
+    buffer: ReplayBuffer,
+    explore: Policy,
+    rng: np.random.Generator,
+    *,
+    verbose: bool,
+) -> DSACAgent | None:
+    """Run the ``total_steps`` collect / update / evaluate loop on ``result``'s agent.
+
+    ``explore`` acts through the warm-up. Fills the episode, update and
+    evaluation histories of ``result`` and returns the best-scoring checkpoint
+    (``None`` unless :attr:`TrainConfig.restore_best` is set).
+    """
+    env, agent = result.env, result.agent
+    obs, _ = env.reset(seed=config.seed)
+    tally = _EpisodeTally()
+    stats: dict[str, float] = {}
+    best_agent: DSACAgent | None = None
+
+    for step in range(1, config.total_steps + 1):
+        action = explore(obs) if step <= config.warmup else agent.act(obs)
+        next_obs, reward, terminated, truncated, info = _collect(
+            env, buffer, obs, action, config.branch_k
+        )
+        tally.add(reward, info)
+        obs = next_obs
+
+        if terminated or truncated:
+            result.episodes_.append(tally.entry(step, terminated))
+            obs, _ = env.reset()
+            tally = _EpisodeTally()
+
+        stats = _update(agent, buffer, config, rng, step, stats)
+
+        if stats and step % config.log_every == 0:
+            result.updates_.append({"step": step, **stats})
+
+        if step % config.eval_every == 0 or step == config.total_steps:
+            clone = _checkpoint(result, config, agent, step, stats, verbose=verbose)
+            if clone is not None:
+                best_agent = clone
+            # The evaluation ran on a copy, but the training environment's own
+            # episode is mid-flight; leave it running.
+    return best_agent
+
+
+def _update(
+    agent: DSACAgent,
+    buffer: ReplayBuffer,
+    config: TrainConfig,
+    rng: np.random.Generator,
+    step: int,
+    stats: dict[str, float],
+) -> dict[str, float]:
+    """Run this step's gradient updates, once warm and the buffer holds a batch.
+
+    Returns the last update's statistics, or ``stats`` unchanged when no update
+    ran.
+    """
+    if step <= config.warmup or len(buffer) < config.batch:
+        return stats
+    for _ in range(config.updates_per_step):
+        stats = agent.update(buffer.sample(config.batch, rng))
+    return stats
+
+
+@dataclass
+class _EpisodeTally:
+    """The running totals of the training episode in flight."""
+
+    episode_return: float = 0.0
+    episode_steps: int = 0
+    episode_terms: dict[str, list[float]] = field(default_factory=dict)
+
+    def add(self, reward: float, info: Mapping[str, Any]) -> None:
+        """Fold one followed step's ``reward`` and its reward terms into the tally."""
+        self.episode_return += reward
+        self.episode_steps += 1
+        for name, value in info.get("reward_terms", {}).items():
+            self.episode_terms.setdefault(name, []).append(value)
+
+    def entry(self, step: int, terminated: bool) -> dict[str, float]:
+        """The :attr:`TrainingResult.episodes_` entry for the episode ending at ``step``."""
+        entry = {
+            "step": step,
+            "return": self.episode_return,
+            "length": self.episode_steps,
+            "collapsed": float(terminated),
+        }
+        entry.update(
+            {f"term_{k}": float(np.mean(v)) for k, v in self.episode_terms.items()}
+        )
+        return entry
+
+
+def _references(
+    result: TrainingResult, config: TrainConfig, explore: Policy
+) -> tuple[CentralBankEnv, dict[str, Policy]]:
+    """The reference policies and the environment they are scored in.
+
+    ``explore`` is the warm-up policy, which doubles as the random reference.
+    """
+    # The references act on a free instrument (see :func:`free_instrument`) --
+    # an environment of their own over the same futures under the same seed, so
+    # every comparison stays paired while only the agent is speed-constrained.
+    ref_env = build_env(
+        copy.copy(result.proxy),
+        result.world,
+        result.observer,
+        result.env.reward,
+        free_instrument(config),
+        split="eval",
+        seed=config.seed + 1,
+    )
+    model = result.world.config.model
+    references: dict[str, Policy] = {
+        "random": explore,
+        "calibration": constant_policy(ref_env, calibration_actions(model)),
+        "taylor": taylor_policy(
+            ref_env,
+            result.observer,
+            dt=config.dt,
+            pi_target=config.pi_target,
+            model=model,
+        ),
+    }
+    return ref_env, references
+
+
+def _print_plan(result: TrainingResult, config: TrainConfig) -> None:
+    """Print the reference scores and the training budget about to be spent."""
+    for name, scores in result.baselines_.items():
+        print(
+            f"baseline {name:>12}: return {scores['return']:9.1f} "
+            f"+- {scores['return_std']:7.1f}  "
+            f"collapse {scores['collapse_rate']:.0%}"
+        )
+    stored = config.total_steps * config.branch_k
+    print(
+        f"train: {config.total_steps} steps x {config.branch_k} draws "
+        f"= {stored} proxy draws "
+        f"({config.risk_measure().name} risk, device={result.agent.device})"
+    )
+    if stored > config.capacity:
+        print(
+            f"  note: {stored} transitions into a {config.capacity} buffer -- "
+            f"the oldest {stored - config.capacity} are evicted before the end"
+        )
+
+
+def _collect(
+    env: CentralBankEnv,
+    buffer: ReplayBuffer,
+    obs: np.ndarray,
+    action: np.ndarray,
+    branch_k: int,
+) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+    """Take one training step from ``obs``, storing every draw of it in ``buffer``.
+
+    Returns the followed draw as a ``(obs, reward, terminated, truncated, info)``
+    step.
+    """
+    # Every draw of this transition is stored; only the last is followed, so
+    # the trajectory is unchanged and the buffer gains ``branch_k`` samples of
+    # the kernel at this state rather than one.
+    draws = env.branch_step(action, branch_k)
+    # What the instrument *applied* -- the effective step, which is the
+    # requested one only short of the box's edge (see
+    # :meth:`~control.env.CentralBankEnv.resolve_action`). Every draw from
+    # this position applied the same one; storing the request instead would
+    # pair a reward with an action that did not earn it.
+    applied = draws[-1].info.get("action", action)
+    # ``done`` marks a genuine terminal state only: a horizon truncation must
+    # still bootstrap, or the agent learns the world ends every episode.
+    for draw in draws:
+        buffer.add(obs, applied, draw.reward, draw.obs, draw.terminated)
+    return draws[-1].as_step()
+
+
+def _checkpoint(
+    result: TrainingResult,
+    config: TrainConfig,
+    agent: DSACAgent,
+    step: int,
+    stats: Mapping[str, float],
+    *,
+    verbose: bool,
+) -> DSACAgent | None:
+    """Score ``agent`` on the held-out futures at ``step`` and log the sweep.
+
+    Returns a clone of ``agent`` when it is the best-scoring checkpoint so far
+    and :attr:`TrainConfig.restore_best` is set, otherwise ``None``.
+    """
+    scores = evaluate(
+        result.eval_env,
+        agent_policy(agent),
+        config.eval_episodes,
+        repeats=config.eval_repeats,
+    )
+    result.evals_.append({"step": step, **scores})
+    best_agent = None
+    if config.restore_best and (
+        not result.best_ or scores["return"] > result.best_["return"]
+    ):
+        result.best_ = {"step": float(step), "return": scores["return"]}
+        best_agent = agent.clone()
+    if verbose:
+        recent = result.episodes_[-20:]
+        train_return = np.mean([e["return"] for e in recent]) if recent else np.nan
+        print(
+            f"  [{step:>7}/{config.total_steps}] "
+            f"train {train_return:9.1f} | eval {scores['return']:9.1f} "
+            f"+- {scores['return_std']:7.1f} | "
+            f"collapse {scores['collapse_rate']:.0%} | "
+            f"alpha {stats.get('alpha', float('nan')):.3f}"
+        )
+    return best_agent
+
+
+def _final_scoring(
+    result: TrainingResult,
+    config: TrainConfig,
+    ref_env: CentralBankEnv,
+    references: Mapping[str, Policy],
+    *,
+    verbose: bool,
+) -> None:
+    """Re-score the agent and the references with ``final_repeats`` rolls each.
+
+    Fills :attr:`TrainingResult.final_`.
+    """
+    if verbose:
+        print(
+            f"final scoring: {config.eval_episodes} futures x "
+            f"{config.final_repeats} rolls..."
+        )
+    scored = {"agent": (result.eval_env, agent_policy(result.agent))}
+    scored.update({name: (ref_env, policy) for name, policy in references.items()})
+    result.final_ = {
+        name: evaluate(
+            scoring_env, policy, config.eval_episodes, repeats=config.final_repeats
+        )
+        for name, (scoring_env, policy) in scored.items()
+    }
+    if verbose:
+        for name, scores in result.final_.items():
+            print(
+                f"  {name:>12}: {scores['return']:9.1f} "
+                f"+- {scores['return_std']:6.1f} across futures, "
+                f"+- {scores['noise_std']:6.1f} from proxy noise "
+                f"| collapse {scores['collapse_rate']:.0%}"
+            )
 
 
 # -- CLI ---------------------------------------------------------------------
@@ -1134,7 +1329,9 @@ def _parse_args() -> TrainConfig:
         help_text = f.metadata.get("help", "")
         if isinstance(current, bool):
             ap.add_argument(
-                flag, default=current, help=help_text,
+                flag,
+                default=current,
+                help=help_text,
                 action=argparse.BooleanOptionalAction,
             )
             continue
@@ -1142,7 +1339,9 @@ def _parse_args() -> TrainConfig:
             flag, type=_flag_kind(str(f.type)), default=current, help=help_text
         )
     args = ap.parse_args()
-    return replace(defaults, **{f.name: getattr(args, f.name) for f in fields(defaults)})
+    return replace(
+        defaults, **{f.name: getattr(args, f.name) for f in fields(defaults)}
+    )
 
 
 def main() -> None:
@@ -1154,12 +1353,10 @@ def main() -> None:
     and the file stays empty until the process exits. Line buffering costs
     nothing at one line per few thousand steps and makes ``tail -f`` work.
     """
-    sys.stdout.reconfigure(line_buffering=True)
+    cast(io.TextIOWrapper, sys.stdout).reconfigure(line_buffering=True)
     config = _parse_args()
     result = train(config)
-    scores = result.final_ or {
-        "agent": result.evals_[-1], **result.baselines_
-    }
+    scores = result.final_ or {"agent": result.evals_[-1], **result.baselines_}
     print(
         f"final: agent {scores['agent']['return']:.1f} "
         f"(taylor {scores['taylor']['return']:.1f}, "

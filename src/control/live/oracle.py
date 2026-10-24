@@ -61,8 +61,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from parallel import guarded_pool, terminate
-
 from control.dsac.train import (
     build_truth_env,
     calibration_actions,
@@ -73,6 +71,7 @@ from control.dsac.train import (
 from control.env import CentralBankEnv
 from control.live.deploy import LiveConfig, RunRecord, _OutcomeTracker
 from control.world import Episode, TrainingWorld
+from parallel import guarded_pool, terminate
 
 if TYPE_CHECKING:
     from control.dsac.train import TrainingResult
@@ -280,7 +279,9 @@ class _Evaluator:
         self.world = world
         self.episode = episode
         self.seed = seed
-        workers = oracle.workers if oracle.workers else max(1, (os.cpu_count() or 2) - 2)
+        workers = (
+            oracle.workers if oracle.workers else max(1, (os.cpu_count() or 2) - 2)
+        )
         workers = min(workers, oracle.population)
         self.pool: ProcessPoolExecutor | None = None
         if workers > 1:
@@ -332,8 +333,11 @@ def _taylor_path(
     even when the rule itself was not.
     """
     policy = taylor_policy(
-        env, result.observer, dt=result.config.dt,
-        pi_target=result.config.pi_target, model=result.world.config.model,
+        env,
+        result.observer,
+        dt=result.config.dt,
+        pi_target=result.config.pi_target,
+        model=result.world.config.model,
     )
     obs, _ = env.reset(seed=seed, episode=episode)
     reset_policy(policy)
@@ -389,9 +393,7 @@ def _seed_population(
 # -- the genetic algorithm ---------------------------------------------------
 
 
-def _select(
-    fitness: np.ndarray, oracle: OracleConfig, rng: np.random.Generator
-) -> int:
+def _select(fitness: np.ndarray, oracle: OracleConfig, rng: np.random.Generator) -> int:
     """Tournament selection: the fittest of ``tournament`` uniform draws."""
     picks = rng.integers(len(fitness), size=oracle.tournament)
     return int(picks[np.argmax(fitness[picks])])
@@ -426,6 +428,38 @@ def _child(
     return np.clip(genome.ravel(), -1.0, 1.0)
 
 
+def _next_generation(
+    evaluator: _Evaluator,
+    population: list[np.ndarray],
+    fitness: np.ndarray,
+    oracle: OracleConfig,
+    g: int,
+    knot_times: np.ndarray,
+    steps: int,
+    rng: np.random.Generator,
+) -> tuple[list[np.ndarray], np.ndarray]:
+    """Generation ``g``: the elite carried over plus freshly evaluated children.
+
+    Returns the new ``(population, fitness)``; the elite keep their fitness
+    rather than being re-evaluated.
+    """
+    # A geometric anneal from sigma to sigma_final: wide moves while the
+    # search is placing the path, fine ones once it is shaping it.
+    frac = g / max(1, oracle.generations - 1)
+    sigma = oracle.sigma * (oracle.sigma_final / oracle.sigma) ** min(1.0, frac)
+    order = np.argsort(fitness)[::-1][: oracle.elite]
+    children = [
+        _child(population, fitness, oracle, sigma, len(knot_times), rng)
+        for _ in range(oracle.population - oracle.elite)
+    ]
+    child_records = evaluator.evaluate(
+        [_positions(c, knot_times, steps) for c in children]
+    )
+    population = [population[i] for i in order] + children
+    fitness = np.concatenate([fitness[order], [r.total for r in child_records]])
+    return population, fitness
+
+
 def _optimise(
     env: CentralBankEnv,
     evaluator: _Evaluator,
@@ -451,9 +485,7 @@ def _optimise(
     population = _seed_population(
         env, result, episode, oracle, knot_times, steps, rng, seed=seed
     )
-    records = evaluator.evaluate(
-        [_positions(g, knot_times, steps) for g in population]
-    )
+    records = evaluator.evaluate([_positions(g, knot_times, steps) for g in population])
     fitness = np.array([r.total for r in records])
     best = int(np.argmax(fitness))
     best_genome, best_fit = population[best].copy(), float(fitness[best])
@@ -461,21 +493,8 @@ def _optimise(
     stale = 0
 
     for g in range(1, oracle.generations + 1):
-        # A geometric anneal from sigma to sigma_final: wide moves while the
-        # search is placing the path, fine ones once it is shaping it.
-        frac = g / max(1, oracle.generations - 1)
-        sigma = oracle.sigma * (oracle.sigma_final / oracle.sigma) ** min(1.0, frac)
-        order = np.argsort(fitness)[::-1][: oracle.elite]
-        children = [
-            _child(population, fitness, oracle, sigma, len(knot_times), rng)
-            for _ in range(oracle.population - oracle.elite)
-        ]
-        child_records = evaluator.evaluate(
-            [_positions(c, knot_times, steps) for c in children]
-        )
-        population = [population[i] for i in order] + children
-        fitness = np.concatenate(
-            [fitness[order], [r.total for r in child_records]]
+        population, fitness = _next_generation(
+            evaluator, population, fitness, oracle, g, knot_times, steps, rng
         )
 
         top = int(np.argmax(fitness))
@@ -498,7 +517,10 @@ def _optimise(
             break
 
     record = _run(
-        env, result.world, episode, _positions(best_genome, knot_times, steps),
+        env,
+        result.world,
+        episode,
+        _positions(best_genome, knot_times, steps),
         seed=seed,
     )
     record.events_ = events
@@ -529,13 +551,28 @@ def _cache_file(
     key = "|".join(
         str(v)
         for v in (
-            cfg.excitation, cfg.deploy_excitation, cfg.deploy_jitter,
-            cfg.world_seed, cfg.dt, cfg.history_steps, cfg.delta_rate,
-            episode.index, steps, seed,
-            oracle.population, oracle.generations, oracle.knot_every,
-            oracle.elite, oracle.tournament, oracle.crossover, oracle.mutation,
-            oracle.sigma, oracle.sigma_final, oracle.patience,
-            oracle.instrument, oracle.seed,
+            cfg.excitation,
+            cfg.deploy_excitation,
+            cfg.deploy_jitter,
+            cfg.world_seed,
+            cfg.dt,
+            cfg.history_steps,
+            cfg.delta_rate,
+            episode.index,
+            steps,
+            seed,
+            oracle.population,
+            oracle.generations,
+            oracle.knot_every,
+            oracle.elite,
+            oracle.tournament,
+            oracle.crossover,
+            oracle.mutation,
+            oracle.sigma,
+            oracle.sigma_final,
+            oracle.patience,
+            oracle.instrument,
+            oracle.seed,
         )
     )
     digest = hashlib.sha1(key.encode()).hexdigest()[:12]
@@ -611,17 +648,33 @@ def optimal_run(
         else free_instrument(result.config)
     )
     env = build_truth_env(
-        result.world, result.observer, result.env.reward, config,
-        seed=seed, horizon=live.live_steps,
+        result.world,
+        result.observer,
+        result.env.reward,
+        config,
+        seed=seed,
+        horizon=live.live_steps,
     )
     evaluator = _Evaluator(
-        env, result.world, episode, oracle,
-        observer=result.observer, reward=result.env.reward, config=config,
-        horizon=live.live_steps, seed=seed,
+        env,
+        result.world,
+        episode,
+        oracle,
+        observer=result.observer,
+        reward=result.env.reward,
+        config=config,
+        horizon=live.live_steps,
+        seed=seed,
     )
     try:
         genome, record = _optimise(
-            env, evaluator, result, episode, oracle, steps, seed=seed,
+            env,
+            evaluator,
+            result,
+            episode,
+            oracle,
+            steps,
+            seed=seed,
             verbose=verbose,
         )
     finally:

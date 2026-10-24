@@ -21,15 +21,16 @@ model's hidden internals are owned by the concrete model itself.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import Field, dataclass, field, fields
-from typing import Any, ClassVar, Mapping, Sequence, TypeVar
+from typing import Any, ClassVar, Protocol, TypeVar
 
 T = TypeVar("T", bound="ValueSpace")
 
 
 def _observable(desc: str) -> float:
     """A required ``float`` field carrying a human-readable description."""
-    return field(metadata={"desc": desc})  # type: ignore[return-value]
+    return field(metadata={"desc": desc})
 
 
 class ValueSpace:
@@ -100,3 +101,42 @@ class Actions(ValueSpace):
 
     Abstract: each model supplies its own fields.
     """
+
+
+class SharedState(Protocol):
+    """The state observables every ground-truth economy carries under one name.
+
+    Real output ``Yk``, the employment rate ``ER`` and annualised inflation
+    ``PI`` mean the same thing in every model, which is what lets the mandate and
+    the plausibility bounds read any concrete :class:`State` without knowing
+    which economy produced it.
+    """
+
+    @property
+    def Yk(self) -> float:
+        """Real output."""
+
+    @property
+    def ER(self) -> float:
+        """Employment rate."""
+
+    @property
+    def PI(self) -> float:
+        """Price inflation, annualised."""
+
+
+class SharedParameters(Protocol):
+    """The exogenous parameters every ground-truth economy carries under one name.
+
+    The parameter-side twin of :class:`SharedState`: productivity growth
+    ``GRpr`` and the full-employment labour level ``Nfe``, from which the mandate
+    builds potential growth.
+    """
+
+    @property
+    def GRpr(self) -> float:
+        """Trend growth rate of productivity, annualised."""
+
+    @property
+    def Nfe(self) -> float:
+        """Full-employment labour level."""

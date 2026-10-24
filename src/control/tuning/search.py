@@ -23,8 +23,9 @@ answer: the gap between the two is the size of the bias.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 import optuna
@@ -33,7 +34,6 @@ from optuna.samplers import TPESampler
 
 from control.tuning.objective import Evaluator, Fold, TuningConfig
 from control.tuning.policies import TunablePolicy
-
 
 # -- the result ------------------------------------------------------------
 
@@ -134,7 +134,9 @@ def optimise(
             n_trials=trials,
         )
 
-        records = [_record(t) for t in study.trials if t.state != optuna.trial.TrialState.FAIL]
+        records = [
+            _record(t) for t in study.trials if t.state != optuna.trial.TrialState.FAIL
+        ]
         chosen = _finalists(records, finalists)
         if verbose:
             print(

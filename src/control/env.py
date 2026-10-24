@@ -28,19 +28,19 @@ two different copies of the reward and collapse rules.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, cast
 
 import numpy as np
 from pysolve.model import CalculationError, SolutionNotFoundError
-
-from economic_models.interface import ModelInterface
-from economic_models.variables import Actions, Parameters, State
 
 from control.drivers import ModelDriver
 from control.observation import Observer
 from control.rewards import RewardContext, RewardFunction
 from control.world import Episode, EpisodeBank
+from economic_models.interface import ModelInterface
+from economic_models.variables import Actions, Parameters, SharedState, State
 
 #: The action box. Deliberately ~50% wider than the AR(1) clip bands the
 #: excitation drew these levers inside (Rbbar (0.015, 0.055), NCAR (0.07, 0.14),
@@ -194,7 +194,8 @@ class CentralBankEnv:
             [name in interface.transform_spec.log_diff for name in state_names]
         )
         bounds = np.array(
-            [self.config.action_bounds[name] for name in self._action_names], dtype=float
+            [self.config.action_bounds[name] for name in self._action_names],
+            dtype=float,
         )
         self._low, self._high = bounds[:, 0], bounds[:, 1]
 
@@ -330,8 +331,9 @@ class CentralBankEnv:
 
     # -- episode -------------------------------------------------------------
 
-    def reset(self, *, seed: int | None = None, episode: Episode | None = None
-              ) -> tuple[np.ndarray, dict[str, Any]]:
+    def reset(
+        self, *, seed: int | None = None, episode: Episode | None = None
+    ) -> tuple[np.ndarray, dict[str, Any]]:
         """Start a new episode at its future's branch point.
 
         ``episode`` forces a particular future (deterministic evaluation);
@@ -348,7 +350,9 @@ class CentralBankEnv:
         """
         if seed is not None:
             self._rng = np.random.default_rng(seed)
-        self._episode = episode if episode is not None else self.episodes.draw(self._rng)
+        self._episode = (
+            episode if episode is not None else self.episodes.draw(self._rng)
+        )
         self._t = 0
 
         branch = self._episode.branch
@@ -432,7 +436,7 @@ class CentralBankEnv:
         prev_params = self._params_of(prev_exog)
         prev_actions = self._actions_of(prev_exog)
 
-        params = self._exog_row(self._t, prev_state.ER)
+        params = self._exog_row(self._t, cast(SharedState, prev_state).ER)
         parameters = self.interface.parameters.from_dict(
             dict(zip(self._param_names, params))
         )
@@ -446,7 +450,12 @@ class CentralBankEnv:
 
         try:
             state = self.driver.step(parameters, actions, hidden, self._rng)
-        except (ValueError, CalculationError, SolutionNotFoundError, RuntimeError) as exc:
+        except (
+            ValueError,
+            CalculationError,
+            SolutionNotFoundError,
+            RuntimeError,
+        ) as exc:
             return self._collapse(str(exc))
 
         levels = self.levels_of(state)
@@ -465,7 +474,9 @@ class CentralBankEnv:
         terms = self.reward.terms(ctx)
         reward = float(sum(self.reward.weights[k] * v for k, v in terms.items()))
 
-        exog_now = np.hstack([params, [getattr(actions, n) for n in self._action_names]])
+        exog_now = np.hstack(
+            [params, [getattr(actions, n) for n in self._action_names]]
+        )
         states = np.vstack([self._states[-1], levels])
         exog = np.vstack([self._exog[-1], exog_now])
         try:
@@ -556,9 +567,10 @@ class CentralBankEnv:
         """Whether the realised state is an economy the model could have produced."""
         if not np.all(np.isfinite(levels)):
             return False
-        if not self.config.er_bounds[0] <= state.ER <= self.config.er_bounds[1]:
+        shared = cast(SharedState, state)
+        if not self.config.er_bounds[0] <= shared.ER <= self.config.er_bounds[1]:
             return False
-        if not self.config.pi_bounds[0] <= state.PI <= self.config.pi_bounds[1]:
+        if not self.config.pi_bounds[0] <= shared.PI <= self.config.pi_bounds[1]:
             return False
         return bool(np.all(levels[self._positive] > 0.0))
 

@@ -16,9 +16,15 @@ from economic_models.ground_truth.models.smets_wouters.modules.exogenous import 
     INNOVATIONS,
     add_exogenous_block,
 )
-from economic_models.ground_truth.models.smets_wouters.modules.nominal import add_nominal_block
-from economic_models.ground_truth.models.smets_wouters.modules.policy import add_policy_block
-from economic_models.ground_truth.models.smets_wouters.modules.real import add_real_block
+from economic_models.ground_truth.models.smets_wouters.modules.nominal import (
+    add_nominal_block,
+)
+from economic_models.ground_truth.models.smets_wouters.modules.policy import (
+    add_policy_block,
+)
+from economic_models.ground_truth.models.smets_wouters.modules.real import (
+    add_real_block,
+)
 from economic_models.ground_truth.models.smets_wouters.parameters import SwParams
 from economic_models.ground_truth.models.smets_wouters.system import LinearSystem
 

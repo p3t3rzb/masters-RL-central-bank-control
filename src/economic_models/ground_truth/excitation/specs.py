@@ -14,11 +14,11 @@ model-specific specs alongside.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import Protocol, Mapping
+from typing import Protocol
 
 import numpy as np
-
 
 
 class SpendingResponse(Protocol):
@@ -31,10 +31,15 @@ class SpendingResponse(Protocol):
     :class:`~control.world.FiscalStabilizer` needs to know.
     """
 
-    #: The visible parameter the response moves.
-    target: str
-    #: Hard limits the response is clipped into.
-    bounds: tuple[float, float]
+    @property
+    def target(self) -> str:
+        """The visible parameter the response moves."""
+        ...
+
+    @property
+    def bounds(self) -> tuple[float, float]:
+        """Hard limits the response is clipped into."""
+        ...
 
     def support(self, er_prev: float) -> float:
         """The addition to spending at employment rate ``er_prev``."""
@@ -98,7 +103,7 @@ class ExcitationJitter:
     #: :func:`discretize_ar1` away from the unit root it cannot discretize.
     phi_bounds: tuple[float, float] = (0.5, 0.98)
 
-    def scaled(self, strength: float) -> "ExcitationJitter":
+    def scaled(self, strength: float) -> ExcitationJitter:
         """The same jitter with every spread multiplied by ``strength``.
 
         One dial over the whole perturbation, so a deployment can be swept from
@@ -203,9 +208,7 @@ class AR1Spec:
         dev = float(np.clip(dev, self.lower - anchor, self.upper - anchor))
         return dev, float(np.clip(anchor + dev + extra, self.lower, self.upper))
 
-    def perturbed(
-        self, rng: np.random.Generator, jitter: ExcitationJitter
-    ) -> "AR1Spec":
+    def perturbed(self, rng: np.random.Generator, jitter: ExcitationJitter) -> AR1Spec:
         """A neighbouring drift: same corridor, its own centre, speed and memory.
 
         The centre shift is scaled by the corridor's own half-width, which is the
@@ -240,7 +243,10 @@ class RandomWalkSpec:
     max_logdev: float  #: maximum absolute log-deviation from baseline
 
     def advance(
-        self, logdev: float, rng: np.random.Generator, sigma_scale: float = 1.0,
+        self,
+        logdev: float,
+        rng: np.random.Generator,
+        sigma_scale: float = 1.0,
         dt: float = 1.0,
     ) -> float:
         """Advance the log-deviation one step and return its clipped value.
@@ -254,7 +260,7 @@ class RandomWalkSpec:
 
     def perturbed(
         self, rng: np.random.Generator, jitter: ExcitationJitter
-    ) -> "RandomWalkSpec":
+    ) -> RandomWalkSpec:
         """A neighbouring walk: same bound, its own step size."""
         return replace(self, sigma=self.sigma * lognormal_factor(rng, jitter.scale))
 
@@ -276,7 +282,9 @@ class StochasticVolatilitySpec:
     xi: float  #: innovation std of log-volatility
     max_logvol: float  #: clip on the absolute log-multiplier
 
-    def advance(self, logvol: float, rng: np.random.Generator, dt: float = 1.0) -> float:
+    def advance(
+        self, logvol: float, rng: np.random.Generator, dt: float = 1.0
+    ) -> float:
         """Advance log-volatility one step and return its clipped value.
 
         Like :class:`AR1Spec`, ``rho``/``xi`` are annual and are discretized
@@ -293,7 +301,7 @@ class StochasticVolatilitySpec:
 
     def perturbed(
         self, rng: np.random.Generator, jitter: ExcitationJitter
-    ) -> "StochasticVolatilitySpec":
+    ) -> StochasticVolatilitySpec:
         """A neighbouring regime: same band, its own stickiness and swing."""
         return replace(
             self,
@@ -331,7 +339,9 @@ class CrisisSpec:
 
     prob: float  #: annual onset probability (converted to a per-step hazard by dt)
     impulses: Mapping[str, float]  #: level shock per input at onset
-    decay_range: tuple[float, float]  #: per-onset *annual* geometric decay, drawn uniformly
+    decay_range: tuple[
+        float, float
+    ]  #: per-onset *annual* geometric decay, drawn uniformly
     min_gap: int = 6  #: minimum years between successive onsets
     severity_range: tuple[float, float] = (1.0, 1.0)  #: per-onset magnitude scale
     financial_prob: float = 0.0  #: chance an onset also triggers the financial bundle
@@ -345,7 +355,7 @@ class CrisisSpec:
 
     def perturbed(
         self, rng: np.random.Generator, jitter: ExcitationJitter
-    ) -> "CrisisSpec":
+    ) -> CrisisSpec:
         """Crises of a different character: same kind of event, its own anatomy.
 
         Each impulse is drawn its **own** multiplier rather than the bundle
@@ -378,7 +388,9 @@ class CrisisSpec:
                 for name, value in self.impulses.items()
             },
             financial_prob=float(
-                np.clip(self.financial_prob * lognormal_factor(rng, jitter.rate), 0.0, 1.0)
+                np.clip(
+                    self.financial_prob * lognormal_factor(rng, jitter.rate), 0.0, 1.0
+                )
             ),
             financial_impulses={
                 name: value * lognormal_factor(rng, jitter.impulse)
@@ -421,7 +433,7 @@ class ClimateSpec:
 
     def perturbed(
         self, rng: np.random.Generator, jitter: ExcitationJitter
-    ) -> "ClimateSpec":
+    ) -> ClimateSpec:
         """A neighbouring mix of run characters: same axis, different weather map.
 
         ``a`` and ``b`` move so the calm/stormy balance differs, and the two

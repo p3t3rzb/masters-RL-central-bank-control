@@ -22,7 +22,6 @@ from economic_models.ground_truth.excitation.specs import (
 )
 from economic_models.ground_truth.models.growth.excitation.specs import GovSpendingSpec
 
-
 # -- discretization ----------------------------------------------------------
 
 
@@ -60,7 +59,9 @@ def test_ar1_level_never_leaves_its_corridor():
         levels.append(level)
     assert min(levels) >= spec.lower
     assert max(levels) <= spec.upper
-    assert min(levels) == pytest.approx(spec.lower) and max(levels) == pytest.approx(spec.upper)
+    assert min(levels) == pytest.approx(spec.lower) and max(levels) == pytest.approx(
+        spec.upper
+    )
 
 
 def test_ar1_without_noise_rests_at_its_anchor():
@@ -131,8 +132,20 @@ def test_jitter_scales_every_spread_together():
     """One dial over the whole perturbation; zero is the preset itself."""
     jitter = ExcitationJitter()
     zero = jitter.scaled(0.0)
-    assert (zero.center, zero.scale, zero.persistence, zero.rate, zero.impulse, zero.feedback) == (
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    assert (
+        zero.center,
+        zero.scale,
+        zero.persistence,
+        zero.rate,
+        zero.impulse,
+        zero.feedback,
+    ) == (
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
     )
     assert jitter.scaled(2.0).scale == pytest.approx(2.0 * jitter.scale)
     with pytest.raises(ValueError):
@@ -144,13 +157,17 @@ def test_jitter_scales_every_spread_together():
 
 def test_stabilizer_is_silent_at_full_employment():
     """A scenario is drawn at ``ER = 1``, where the response contributes nothing."""
-    spec = GovSpendingSpec(gap_sigma=0.01, gap_clip=0.02, stabilizer=0.5, bounds=(-0.02, 0.08))
+    spec = GovSpendingSpec(
+        gap_sigma=0.01, gap_clip=0.02, stabilizer=0.5, bounds=(-0.02, 0.08)
+    )
     assert spec.support(1.0) == 0.0
 
 
 def test_stabilizer_leans_against_the_employment_gap():
     """Spending rises in a slump and falls in a boom, in proportion to the gap."""
-    spec = GovSpendingSpec(gap_sigma=0.01, gap_clip=0.02, stabilizer=0.5, bounds=(-0.02, 0.08))
+    spec = GovSpendingSpec(
+        gap_sigma=0.01, gap_clip=0.02, stabilizer=0.5, bounds=(-0.02, 0.08)
+    )
     assert spec.support(0.9) == pytest.approx(0.05)
     assert spec.support(1.1) == pytest.approx(-0.05)
     assert spec.target == "GRg"
@@ -158,5 +175,7 @@ def test_stabilizer_leans_against_the_employment_gap():
 
 def test_spending_gap_is_symmetric_around_zero():
     """Trend demand tracks trend supply: the gap drifts around zero inside its clip."""
-    gap = GovSpendingSpec(gap_sigma=0.01, gap_clip=0.02, stabilizer=0.5, bounds=(0.0, 0.1)).gap_spec()
+    gap = GovSpendingSpec(
+        gap_sigma=0.01, gap_clip=0.02, stabilizer=0.5, bounds=(0.0, 0.1)
+    ).gap_spec()
     assert (gap.lower, gap.upper, gap.center) == (-0.02, 0.02, 0.0)

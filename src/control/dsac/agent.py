@@ -23,15 +23,14 @@ heavy-tailed: the proxies emit crisis draws.
 from __future__ import annotations
 
 import copy
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import cast
 
 import numpy as np
 import torch
 from torch import nn
-
-from economic_models._torch import resolve_device
 
 from control.dsac.networks import (
     GainCorrectedPolicy,
@@ -40,6 +39,7 @@ from control.dsac.networks import (
 )
 from control.dsac.replay import Batch
 from control.dsac.risk import MeanRisk, RiskMeasure
+from economic_models._torch import resolve_device
 
 
 @contextmanager
@@ -208,8 +208,11 @@ class DSACAgent:
             soft = target_quantiles - alpha * next_logp
             y = reward + self.gamma * (1.0 - done) * soft  # (n, N)
 
-        critic_loss = sum(
-            self._quantile_huber(critic(obs, action), y) for critic in self.critics
+        critic_loss = cast(
+            torch.Tensor,
+            sum(
+                self._quantile_huber(critic(obs, action), y) for critic in self.critics
+            ),
         )
         self.critic_opt.zero_grad()
         critic_loss.backward()
@@ -253,11 +256,12 @@ class DSACAgent:
         would return a vector that is no longer a coherent return distribution.
         """
         left, right = critics[0](obs, action), critics[1](obs, action)
-        take_left = (left.mean(dim=-1, keepdim=True) <= right.mean(dim=-1, keepdim=True))
+        take_left = left.mean(dim=-1, keepdim=True) <= right.mean(dim=-1, keepdim=True)
         return torch.where(take_left, left, right)
 
-    def _quantile_huber(self, predicted: torch.Tensor, target: torch.Tensor
-                        ) -> torch.Tensor:
+    def _quantile_huber(
+        self, predicted: torch.Tensor, target: torch.Tensor
+    ) -> torch.Tensor:
         """The quantile Huber loss between predicted and target quantiles.
 
         ``predicted`` and ``target`` are ``(n, N)``; the pairwise temporal
@@ -266,16 +270,16 @@ class DSACAgent:
         """
         td = target.unsqueeze(1) - predicted.unsqueeze(2)  # (n, N_pred, N_target)
         k = self.huber_kappa
-        huber = torch.where(
-            td.abs() <= k, 0.5 * td.pow(2), k * (td.abs() - 0.5 * k)
-        )
+        huber = torch.where(td.abs() <= k, 0.5 * td.pow(2), k * (td.abs() - 0.5 * k))
         weight = (self._tau_hat - (td.detach() < 0).float()).abs()
         return (weight * huber / k).sum(dim=1).mean()
 
     def _polyak(self) -> None:
         """Soft-update the target critics toward the live ones."""
         with torch.no_grad():
-            for target, critic in zip(self.targets.parameters(), self.critics.parameters()):
+            for target, critic in zip(
+                self.targets.parameters(), self.critics.parameters()
+            ):
                 target.mul_(1.0 - self.tau).add_(self.tau * critic)
 
     # -- persistence ---------------------------------------------------------

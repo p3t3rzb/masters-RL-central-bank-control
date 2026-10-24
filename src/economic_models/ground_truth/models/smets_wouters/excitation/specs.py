@@ -108,7 +108,9 @@ class SpendingSpec:
         """The discretionary component, as a plain AR(1)."""
         return AR1Spec(sigma=self.gap_sigma, lower=-self.gap_clip, upper=self.gap_clip)
 
-    def perturbed(self, rng: np.random.Generator, jitter: ExcitationJitter) -> "SpendingSpec":
+    def perturbed(
+        self, rng: np.random.Generator, jitter: ExcitationJitter
+    ) -> SpendingSpec:
         """A neighbouring fiscal authority: same limits, different reflexes.
 
         The bounds do not move -- they are the corridor. What moves is how
@@ -119,6 +121,8 @@ class SpendingSpec:
         return SpendingSpec(
             gap_sigma=float(self.gap_sigma * np.exp(rng.normal(0.0, jitter.rate))),
             gap_clip=self.gap_clip,
-            stabilizer=float(max(0.0, self.stabilizer * (1.0 + rng.normal(0.0, jitter.feedback)))),
+            stabilizer=float(
+                max(0.0, self.stabilizer * (1.0 + rng.normal(0.0, jitter.feedback)))
+            ),
             bounds=self.bounds,
         )

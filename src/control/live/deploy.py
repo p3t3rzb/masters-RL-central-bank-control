@@ -62,17 +62,13 @@ from __future__ import annotations
 
 import copy
 import os
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import as_completed
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Callable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-
-from economic_models.proxy import BaseProxyModel
-from economic_models.run import Run
-from economic_models.variables import Actions, Parameters, State
-from parallel import managed_pool
 
 from control.dsac.agent import DSACAgent
 from control.dsac.replay import Batch, ReplayBuffer
@@ -100,10 +96,10 @@ from control.live.forcing import (
 from control.live.monitor import OODMonitor
 from control.live.residual import (
     BlockBootstrapResidualNoise,
-    action_columns,
     NullResidual,
     Residual,
     ResidualModel,
+    action_columns,
     cross_fitted_residuals,
     design,
     fitted_gate,
@@ -111,9 +107,14 @@ from control.live.residual import (
 )
 from control.rewards import RewardContext
 from control.world import Episode, NullStabilizer, TrainingWorld
+from economic_models.proxy import BaseProxyModel
+from economic_models.run import Run
+from economic_models.variables import Actions, Parameters, State
+from parallel import managed_pool
 
 if TYPE_CHECKING:
     from control.live.oracle import OracleConfig
+    from control.observation import Observer
 
 #: The forcing families a deployment can forecast its exogenous environment with.
 FORCINGS = ("var", "bootstrap", "oracle")
@@ -400,9 +401,13 @@ class LiveConfig:
     #: update has been taken. ``None`` keeps that tie; a number breaks it
     #: deliberately.
     monitor_warmup: int | None = None
-    monitor_variance_factor: float = 4.0  #: variance spike, in units of its own recent level
+    monitor_variance_factor: float = (
+        4.0  #: variance spike, in units of its own recent level
+    )
     monitor_residual_z: float = 4.0  #: residual spike, in units of its own recent scale
-    monitor_clip_fraction: float = 0.25  #: observation features at the standardisation clip
+    monitor_clip_fraction: float = (
+        0.25  #: observation features at the standardisation clip
+    )
 
     seed: int = 0  #: seeds the rollouts, the sampling and the acceptance test
 
@@ -425,7 +430,9 @@ class LiveConfig:
                 f"(-1, 1), got {self.explore_rho}"
             )
         if not 0.0 <= self.real_fraction <= 1.0:
-            raise ValueError(f"real_fraction must be in [0, 1], got {self.real_fraction}")
+            raise ValueError(
+                f"real_fraction must be in [0, 1], got {self.real_fraction}"
+            )
         if not self.rollout_min <= self.rollout_length <= self.rollout_max:
             raise ValueError(
                 f"rollout_length {self.rollout_length} is outside "
@@ -574,7 +581,7 @@ def build_residual(
     live: LiveConfig,
     n_outputs: int,
     *,
-    ignore: Sequence[int] | None = None,
+    ignore: Sequence[int] | np.ndarray | None = None,
     verbose: bool = False,
 ) -> Residual:
     """A correction primed on the historic rows, or the null one.
@@ -584,13 +591,9 @@ def build_residual(
     """
     if not live.correct:
         return NullResidual(n_outputs)
-    noise = (
-        BlockBootstrapResidualNoise(n_outputs)
-        if live.bootstrap_noise
-        else None
-    )
+    noise = BlockBootstrapResidualNoise(n_outputs) if live.bootstrap_noise else None
     X, E = seed_rows
-    shared = dict(
+    shared: dict[str, Any] = dict(
         tau=live.tau,
         forgetting=live.forgetting,
         kappa=live.kappa,
@@ -601,8 +604,12 @@ def build_residual(
     # correction rather than a hyperparameter.
     gate = (
         fitted_gate(
-            X, E, floor=live.gate_floor, weight=live.history_weight,
-            verbose=verbose, **shared,
+            X,
+            E,
+            floor=live.gate_floor,
+            weight=live.history_weight,
+            verbose=verbose,
+            **shared,
         )
         if live.gate
         else None
@@ -646,9 +653,7 @@ def mandate_columns(proxy: BaseProxyModel, reward: Any) -> np.ndarray:
     wanted = getattr(reward, "STATES", None)
     if not wanted:
         return np.arange(len(names))
-    return np.array(
-        [names.index(n) for n in wanted if n in names], dtype=int
-    )
+    return np.array([names.index(n) for n in wanted if n in names], dtype=int)
 
 
 # -- short rollouts through the corrected model ------------------------------
@@ -728,7 +733,7 @@ class SyntheticRollouts:
             # is the one thing this class exists to guarantee.
             position, action = self.env.resolve_action(policy(obs), exog[-1])
             params = self.stabilizer.apply(path[j], float(states[-1][self._er]))
-            parameters = interface.parameters.from_row(params)
+            parameters = interface.parameters.from_row(params.tolist())
             actions = self.env.to_actions(position)
 
             penalty = self.env.config.collapse_penalty * max(
@@ -850,33 +855,53 @@ def deploy(
     remaining use.
     """
     live = live or LiveConfig()
-    config = result.config
-    world, observer = result.world, result.observer
-    rng = np.random.default_rng(live.seed + seed)
-
-    # The instrument's speed is the environment's, not a filter on the agent's
-    # output, so the deployment, its synthetic rollouts and the references all
-    # act under the same instrument -- the one the offline run was trained
-    # against.
-    env = build_truth_env(
-        world, observer, result.env.reward, config, seed=seed,
-        horizon=live.live_steps,
+    run, obs = _LiveRun.start(
+        result,
+        episode,
+        live,
+        seed_rows=seed_rows,
+        seed=seed,
+        adapt=adapt,
+        verbose=verbose,
     )
-    n_feat = len(result.proxy.transform.state_feature_names)
+    env, record = run.env, run.record
 
-    # The policy being deployed, the policy it is anchored to, and the policy it
-    # falls back on are three references to two objects: the clone adapts, the
-    # original never moves and is both the anchor and the parachute.
-    #
-    # The anchor is deliberately the *offline* policy rather than the
-    # most-recently-accepted one. Anchoring to the incumbent bounds each update
-    # but not their sum, so a run of small accepted steps can walk the policy
-    # arbitrarily far from a thing that took 10^5 training steps to build, on the
-    # evidence of a few hundred live samples. Anchoring to where it started bounds
-    # the total drift, which is the quantity that actually matters when there is
-    # no reset. (The acceptance test below *is* against the incumbent -- that one
-    # is asking "is this step an improvement", which is a different question.)
-    frozen = result.agent
+    steps = min(live.live_steps, len(episode))
+    for t in range(1, steps + 1):
+        requested = run.excite(run.agent.act(obs, deterministic=True))
+        next_obs, reward, terminated, truncated, info = env.step(requested)
+        # What the instrument actually did, which is what the buffer must record.
+        action = info.get("action", requested)
+
+        if terminated:
+            run.collapse(t, obs, action, reward, next_obs, info, verbose=verbose)
+            break
+
+        run.absorb(t, obs, action, reward, next_obs, info)
+        if adapt:
+            run.maybe_update(t)
+        run.maybe_fall_back(t, verbose=verbose)
+
+        obs = next_obs
+        if truncated:
+            break
+
+    if verbose:
+        print(
+            f"  {record.name}: return {record.total:9.1f} over {len(record)} steps"
+            + ("  COLLAPSED" if record.collapsed else "")
+        )
+    return record
+
+
+def _live_agent(frozen: DSACAgent, live: LiveConfig, observer: Observer) -> DSACAgent:
+    """The clone of ``frozen`` that adapts, with its online learning rates set.
+
+    Under :attr:`LiveConfig.online_policy` ``"gain"`` the clone's actor is
+    restricted to the gain on :attr:`LiveConfig.gain_features`; otherwise the
+    whole actor fine-tunes, at the guarded learning rate when that guardrail is
+    on.
+    """
     agent = frozen.clone()
     if live.online_policy == "gain":
         # Restricted on the clone only: ``frozen`` stays the plain offline
@@ -894,15 +919,30 @@ def deploy(
         )
     elif live.guarding("actor_lr"):
         agent.set_lr(actor=live.actor_lr)
-    anchor_weight = live.anchor_weight if live.guarding("anchor") else 0.0
+    return agent
 
+
+def _corrected_world_model(
+    result: TrainingResult,
+    live: LiveConfig,
+    seed_rows: tuple[np.ndarray, np.ndarray] | None,
+    *,
+    verbose: bool,
+) -> tuple[BaseProxyModel, Residual, CorrectedProxy]:
+    """The shadow proxy, the online correction and the corrected model it drives.
+
+    ``seed_rows`` are the historic residuals the correction is primed on,
+    computed here with :func:`residual_seed` when ``None``.
+    """
+    n_feat = len(result.proxy.transform.state_feature_names)
     # The shadow proxy and the corrected model are shallow copies: they share the
     # expensive fitted estimator and the fitted encoder, and keep their own
     # rollout state, so filtering the live run and imagining a future off it
     # cannot disturb each other.
     shadow: BaseProxyModel = copy.copy(result.proxy)
     rows = (
-        seed_rows if seed_rows is not None
+        seed_rows
+        if seed_rows is not None
         else residual_seed(result, live, verbose=verbose)
     )
     residual = build_residual(
@@ -910,89 +950,244 @@ def deploy(
         live,
         n_feat,
         ignore=(
-            None if live.correct_actions
+            None
+            if live.correct_actions
             else action_columns(result.proxy, rows[0].shape[1])
         ),
         verbose=verbose,
     )
     model = CorrectedProxy(copy.copy(result.proxy), residual)
-    # The three columns the mandate reads, so the record can carry the error
-    # that matters to a policy next to the error over the whole state.
-    mandate = mandate_columns(result.proxy, result.env.reward)
-    # The same conversion the rollout's uncertainty penalty uses, so the record
-    # can report how large that charge actually is per step -- a penalty whose
-    # scale is not known is a penalty whose coefficient cannot be chosen.
-    penalty_cols, penalty_scale = _uncertainty_scale(
-        result.proxy, result.env.reward, world.dt
-    )
+    return shadow, residual, model
 
-    real = RealBuffer(
-        len(world.history) + live.live_steps + 8, env.obs_dim, env.action_dim
-    )
-    seed_from_run(
-        real, world.history, env, observer, env.reward, shadow,
-        interface=env.interface, dt=world.dt, weight=live.history_weight,
-    )
-    # Retention is by capacity on a ring buffer, so ``generations`` is exact only
-    # if every generation contributes the same number of rows -- and it does not,
-    # because k is chosen per update (see :func:`_rollout_length`). Sized on the
-    # nominal k: a stretch of cautious short rollouts retains a few generations
-    # more, a stretch of confident long ones a few less. Sizing on rollout_max
-    # instead would make the *nominal* case retain 5/3 of what it claims to.
-    synthetic = ReplayBuffer(
-        max(1, live.branch_points * live.rollout_length * live.generations),
-        env.obs_dim,
-        env.action_dim,
-    )
-    forcing = build_forcing(live, env, world.history, episode)
-    rollouts = SyntheticRollouts(model, env, forcing, live)
-    monitor = live.build_monitor()
-    er = env.interface.state.names().index("ER")
 
-    record = RunRecord(name="adapting" if adapt else "frozen", episode=episode.index)
-    obs, _ = env.reset(seed=seed, episode=episode)
-    tracker = _OutcomeTracker(env, world)
-    rejections = 0
-    # A stream of its own, keyed to the deployment rather than to the arm: the
-    # frozen reference has no updates to draw for and would otherwise consume the
-    # main stream at a different rate, so a shared generator would hand the two
-    # arms different excitation and quietly unpair them.
-    exciter = np.random.default_rng(live.seed + 7919 + seed)
-    # The excitation's own AR(1) state, shared by the two arms for the same
-    # reason the stream is: they must be perturbed identically or the comparison
-    # stops being about learning from the excited data.
-    shock = np.zeros(env.action_dim)
-    innovation = float(np.sqrt(max(0.0, 1.0 - live.explore_rho**2)))
-    # Which half of the branch states trains the candidate and which scores it.
-    # ``None`` on both is the unsplit behaviour: one pool, used for both.
-    fit_half = 0 if live.holdout_branches else None
-    test_half = 1 if live.holdout_branches else None
+@dataclass
+class _LiveRun:
+    """The apparatus of one live deployment, and the state it carries per period.
 
-    steps = min(live.live_steps, len(episode))
-    for t in range(1, steps + 1):
-        requested = agent.act(obs, deterministic=True)
-        if live.explore:
-            shock = live.explore_rho * shock + innovation * exciter.standard_normal(
-                env.action_dim
-            )
-            requested = np.clip(
-                requested + live.explore * shock, -1.0, 1.0
-            )
-        next_obs, reward, terminated, truncated, info = env.step(requested)
-        # What the instrument actually did, which is what the buffer must record.
-        action = info.get("action", requested)
+    Built once by :meth:`start`; :func:`deploy` then drives one period at a time
+    through :meth:`excite`, :meth:`absorb`, :meth:`maybe_update` and
+    :meth:`maybe_fall_back` (or :meth:`collapse`, which ends the run).
+    """
 
-        if terminated:
-            # Stored, not just recorded. It is the one real transition that shows
-            # the critic where the cliff is, and the run produces at most one of
-            # them ever. No branch point: there is no plausible state to continue
-            # from, which is what collapsing means.
-            real.add(obs, action, reward, next_obs, True, branch=None, weight=1.0)
-            record.steps_.append({"step": t, "reward": reward, "collapsed": 1.0})
-            record.collapsed = True
-            if verbose:
-                print(f"  [{t:>3}] COLLAPSED: {info.get('collapse')}")
-            break
+    live: LiveConfig
+    config: TrainConfig
+    env: CentralBankEnv
+    observer: Observer
+    #: the offline policy: never moves, and is both the anchor and the parachute
+    frozen: DSACAgent
+    #: the policy acting now: the adapting clone, or ``frozen`` after a fallback
+    agent: DSACAgent
+    anchor_weight: float
+    shadow: BaseProxyModel
+    residual: Residual
+    forcing: ForcingModel
+    rollouts: SyntheticRollouts
+    monitor: OODMonitor
+    real: RealBuffer
+    synthetic: ReplayBuffer
+    tracker: _OutcomeTracker
+    record: RunRecord
+    #: the mandate's state-feature columns
+    mandate: np.ndarray
+    #: the uncertainty penalty's columns and leg-unit divisors
+    penalty_cols: np.ndarray
+    penalty_scale: np.ndarray
+    #: column of the employment rate in a state row
+    er: int
+    rng: np.random.Generator
+    exciter: np.random.Generator
+    #: the excitation's AR(1) state and its innovation scale
+    shock: np.ndarray
+    innovation: float
+    #: which half of the branch states trains the candidate and which scores it
+    fit_half: int | None
+    test_half: int | None
+    #: consecutive rejected candidates
+    rejections: int = 0
+
+    @classmethod
+    def start(
+        cls,
+        result: TrainingResult,
+        episode: Episode,
+        live: LiveConfig,
+        *,
+        seed_rows: tuple[np.ndarray, np.ndarray] | None,
+        seed: int,
+        adapt: bool,
+        verbose: bool,
+    ) -> tuple[_LiveRun, np.ndarray]:
+        """Build the whole apparatus for ``episode`` and reset into it.
+
+        Returns the run and the first observation. The arguments are
+        :func:`deploy`'s.
+        """
+        config = result.config
+        world, observer = result.world, result.observer
+        rng = np.random.default_rng(live.seed + seed)
+
+        # The instrument's speed is the environment's, not a filter on the agent's
+        # output, so the deployment, its synthetic rollouts and the references all
+        # act under the same instrument -- the one the offline run was trained
+        # against.
+        env = build_truth_env(
+            world,
+            observer,
+            result.env.reward,
+            config,
+            seed=seed,
+            horizon=live.live_steps,
+        )
+
+        # The policy being deployed, the policy it is anchored to, and the policy it
+        # falls back on are three references to two objects: the clone adapts, the
+        # original never moves and is both the anchor and the parachute.
+        #
+        # The anchor is deliberately the *offline* policy rather than the
+        # most-recently-accepted one. Anchoring to the incumbent bounds each update
+        # but not their sum, so a run of small accepted steps can walk the policy
+        # arbitrarily far from a thing that took 10^5 training steps to build, on the
+        # evidence of a few hundred live samples. Anchoring to where it started bounds
+        # the total drift, which is the quantity that actually matters when there is
+        # no reset. (The acceptance test below *is* against the incumbent -- that one
+        # is asking "is this step an improvement", which is a different question.)
+        frozen = result.agent
+        agent = _live_agent(frozen, live, observer)
+        anchor_weight = live.anchor_weight if live.guarding("anchor") else 0.0
+
+        shadow, residual, model = _corrected_world_model(
+            result, live, seed_rows, verbose=verbose
+        )
+        # The three columns the mandate reads, so the record can carry the error
+        # that matters to a policy next to the error over the whole state.
+        mandate = mandate_columns(result.proxy, result.env.reward)
+        # The same conversion the rollout's uncertainty penalty uses, so the record
+        # can report how large that charge actually is per step -- a penalty whose
+        # scale is not known is a penalty whose coefficient cannot be chosen.
+        penalty_cols, penalty_scale = _uncertainty_scale(
+            result.proxy, result.env.reward, world.dt
+        )
+
+        real = RealBuffer(
+            len(world.history) + live.live_steps + 8, env.obs_dim, env.action_dim
+        )
+        seed_from_run(
+            real,
+            world.history,
+            env,
+            observer,
+            env.reward,
+            shadow,
+            interface=env.interface,
+            dt=world.dt,
+            weight=live.history_weight,
+        )
+        # Retention is by capacity on a ring buffer, so ``generations`` is exact only
+        # if every generation contributes the same number of rows -- and it does not,
+        # because k is chosen per update (see :func:`_rollout_length`). Sized on the
+        # nominal k: a stretch of cautious short rollouts retains a few generations
+        # more, a stretch of confident long ones a few less. Sizing on rollout_max
+        # instead would make the *nominal* case retain 5/3 of what it claims to.
+        synthetic = ReplayBuffer(
+            max(1, live.branch_points * live.rollout_length * live.generations),
+            env.obs_dim,
+            env.action_dim,
+        )
+        forcing = build_forcing(live, env, world.history, episode)
+        rollouts = SyntheticRollouts(model, env, forcing, live)
+        monitor = live.build_monitor()
+        er = env.interface.state.names().index("ER")
+
+        record = RunRecord(
+            name="adapting" if adapt else "frozen", episode=episode.index
+        )
+        obs, _ = env.reset(seed=seed, episode=episode)
+        tracker = _OutcomeTracker(env, world)
+        run = cls(
+            live=live,
+            config=config,
+            env=env,
+            observer=observer,
+            frozen=frozen,
+            agent=agent,
+            anchor_weight=anchor_weight,
+            shadow=shadow,
+            residual=residual,
+            forcing=forcing,
+            rollouts=rollouts,
+            monitor=monitor,
+            real=real,
+            synthetic=synthetic,
+            tracker=tracker,
+            record=record,
+            mandate=mandate,
+            penalty_cols=penalty_cols,
+            penalty_scale=penalty_scale,
+            er=er,
+            rng=rng,
+            # A stream of its own, keyed to the deployment rather than to the arm:
+            # the frozen reference has no updates to draw for and would otherwise
+            # consume the main stream at a different rate, so a shared generator
+            # would hand the two arms different excitation and quietly unpair
+            # them.
+            exciter=np.random.default_rng(live.seed + 7919 + seed),
+            # The excitation's own AR(1) state, shared by the two arms for the
+            # same reason the stream is: they must be perturbed identically or
+            # the comparison stops being about learning from the excited data.
+            shock=np.zeros(env.action_dim),
+            innovation=float(np.sqrt(max(0.0, 1.0 - live.explore_rho**2))),
+            # Which half of the branch states trains the candidate and which
+            # scores it. ``None`` on both is the unsplit behaviour: one pool,
+            # used for both.
+            fit_half=0 if live.holdout_branches else None,
+            test_half=1 if live.holdout_branches else None,
+        )
+        return run, obs
+
+    def excite(self, requested: np.ndarray) -> np.ndarray:
+        """The policy's ``requested`` step plus this period's exploration shock."""
+        live = self.live
+        if not live.explore:
+            return requested
+        self.shock = live.explore_rho * self.shock + (
+            self.innovation * self.exciter.standard_normal(self.env.action_dim)
+        )
+        return np.clip(requested + live.explore * self.shock, -1.0, 1.0)
+
+    def collapse(
+        self,
+        t: int,
+        obs: np.ndarray,
+        action: np.ndarray,
+        reward: float,
+        next_obs: np.ndarray,
+        info: Mapping[str, Any],
+        *,
+        verbose: bool,
+    ) -> None:
+        """Store and record the collapse at period ``t``, which ends the run."""
+        # Stored, not just recorded. It is the one real transition that shows
+        # the critic where the cliff is, and the run produces at most one of
+        # them ever. No branch point: there is no plausible state to continue
+        # from, which is what collapsing means.
+        self.real.add(obs, action, reward, next_obs, True, branch=None, weight=1.0)
+        self.record.steps_.append({"step": t, "reward": reward, "collapsed": 1.0})
+        self.record.collapsed = True
+        if verbose:
+            print(f"  [{t:>3}] COLLAPSED: {info.get('collapse')}")
+
+    def absorb(
+        self,
+        t: int,
+        obs: np.ndarray,
+        action: np.ndarray,
+        reward: float,
+        next_obs: np.ndarray,
+        info: Mapping[str, Any],
+    ) -> None:
+        """Learn the model error from period ``t``, store it, and log the period."""
+        env, shadow, residual = self.env, self.shadow, self.residual
+        assert env.states is not None and env.exog is not None
 
         # -- what did the proxy think would happen? --------------------------
         state, params, actions = info["state"], info["parameters"], info["actions"]
@@ -1012,16 +1207,22 @@ def deploy(
         shadow.absorb(state, params, actions)
         # ``env.states[0]`` is the row this step started from, whose employment
         # rate is the one the stabilizer responded to when it built ``params``.
-        forcing.absorb(
+        self.forcing.absorb(
             np.array(list(params.to_dict().values()), dtype=float),
-            er_prev=float(env.states[0][er]),
+            er_prev=float(env.states[0][self.er]),
         )
-        if isinstance(forcing, OracleForcing):
-            forcing.advance()
+        if isinstance(self.forcing, OracleForcing):
+            self.forcing.advance()
 
-        reading = monitor.update(t, variance, eps, next_obs, clip=observer.clip)
-        real.add(
-            obs, action, reward, next_obs, False,
+        reading = self.monitor.update(
+            t, variance, eps, next_obs, clip=self.observer.clip
+        )
+        self.real.add(
+            obs,
+            action,
+            reward,
+            next_obs,
+            False,
             branch=BranchPoint(
                 obs=next_obs,
                 belief=env.belief,
@@ -1031,29 +1232,20 @@ def deploy(
             ),
             weight=1.0,
         )
-        record.steps_.append(
+        self.record.steps_.append(
             {
                 "step": t,
                 "reward": reward,
                 **{f"term_{k}": v for k, v in info["reward_terms"].items()},
-                **tracker.observe(state, params, actions),
+                **self.tracker.observe(state, params, actions),
                 "error_raw": float(np.linalg.norm(eps)),
                 "error_corrected": float(np.linalg.norm(corrected_error)),
-                "error_raw_mandate": float(np.linalg.norm(eps[mandate])),
+                "error_raw_mandate": float(np.linalg.norm(eps[self.mandate])),
                 "error_corrected_mandate": float(
-                    np.linalg.norm(corrected_error[mandate])
+                    np.linalg.norm(corrected_error[self.mandate])
                 ),
                 "residual_var": reading.variance,
-                "uncertainty": (
-                    float(
-                        np.linalg.norm(
-                            np.sqrt(np.maximum(variance[penalty_cols], 0.0))
-                            / penalty_scale
-                        )
-                    )
-                    if len(penalty_cols)
-                    else 0.0
-                ),
+                "uncertainty": self._uncertainty(variance),
                 "bias": float(np.linalg.norm(residual.bias)),
                 "clipped": reading.clipped,
                 "tripped": float(reading.tripped),
@@ -1061,95 +1253,135 @@ def deploy(
             }
         )
 
+    def _uncertainty(self, variance: np.ndarray) -> float:
+        """The rollout's uncertainty charge, in leg units, for one ``variance`` row."""
+        if not len(self.penalty_cols):
+            return 0.0
+        return float(
+            np.linalg.norm(
+                np.sqrt(np.maximum(variance[self.penalty_cols], 0.0))
+                / self.penalty_scale
+            )
+        )
+
+    def maybe_update(self, t: int) -> None:
+        """At an update period, propose a candidate policy and test it for adoption."""
+        live, record = self.live, self.record
         # -- every N steps: regenerate the synthetic data and update ----------
         # The monitor freezes learning only when the guardrails are on; with them
         # off it still reads, and its readings still reach the record, but it is
         # not allowed to stop anything -- otherwise the §8.2 ablation would be
         # "no guardrails except this one".
-        frozen_by_monitor = live.guarding("monitor") and monitor.tripped()
-        due = adapt and t > live.warmup and t % live.update_every == 0
-        if due and record.fallback_at is None and not frozen_by_monitor:
-            # The forcing model has been absorbing rows every step but is only
-            # re-estimated here: its *state* has to be current for a rollout to
-            # start from the right place, its *coefficients* do not, and this is
-            # the clock a deployment can afford to pay estimation on.
-            forcing.refit()
-            k = _rollout_length(live, monitor)
-            _generate(rollouts, real, synthetic, agent, live, k, rng, half=fit_half)
-            candidate = agent.clone()
-            for _ in range(live.gradient_steps):
-                candidate.update(
-                    _mix(real, synthetic, live, rng),
-                    anchor=frozen,
-                    anchor_weight=anchor_weight,
-                )
-            risk = live.accept_risk or config.risk
-            test = (
-                _accept(
-                    candidate, agent, rollouts, real, live,
-                    risk=risk, rng_seed=live.seed + t, half=test_half,
-                )
-                if live.guarding("accept")
-                else AcceptTest(margin=0.0, error=0.0, accepted=True)
-            )
-            # The same comparison on the states the candidate was rolled from.
-            # It decides nothing -- it is the in-sample twin of the margin that
-            # does, and the gap between the two is what "the candidate learned
-            # these particular states" looks like when it is measured rather
-            # than assumed.
-            insample = (
-                _accept(
-                    candidate, agent, rollouts, real, live,
-                    risk=risk, rng_seed=live.seed + t, half=fit_half,
-                ).margin
-                if live.holdout_branches and live.guarding("accept")
-                else None
-            )
-            accepted = test.accepted
-            # What the test was asked to resolve, alongside its verdict: a step
-            # smaller than the test's own error is not a rejected improvement,
-            # it is an improvement nobody could have measured.
-            step_size, drift = _displacement(
-                candidate, agent, frozen, real, live, rng
-            )
-            record.events_.append(
-                {
-                    "step": t,
-                    "kind": "accepted" if accepted else "rejected",
-                    "k": k,
-                    "margin": test.margin,
-                    **({} if insample is None else {"margin_insample": insample}),
-                    "error": test.error,
-                    "move": step_size,
-                    "drift": drift,
-                }
-            )
-            if accepted:
-                agent, rejections = candidate, 0
-            else:
-                rejections += 1
-        elif due and record.fallback_at is None:
+        frozen_by_monitor = live.guarding("monitor") and self.monitor.tripped()
+        due = t > live.warmup and t % live.update_every == 0
+        if not due or record.fallback_at is not None:
+            return
+        if frozen_by_monitor:
             record.events_.append({"step": t, "kind": "frozen-by-monitor"})
+            return
+        # The forcing model has been absorbing rows every step but is only
+        # re-estimated here: its *state* has to be current for a rollout to
+        # start from the right place, its *coefficients* do not, and this is
+        # the clock a deployment can afford to pay estimation on.
+        self.forcing.refit()
+        k = _rollout_length(live, self.monitor)
+        _generate(
+            self.rollouts,
+            self.real,
+            self.synthetic,
+            self.agent,
+            live,
+            k,
+            self.rng,
+            half=self.fit_half,
+        )
+        candidate = self.agent.clone()
+        for _ in range(live.gradient_steps):
+            candidate.update(
+                _mix(self.real, self.synthetic, live, self.rng),
+                anchor=self.frozen,
+                anchor_weight=self.anchor_weight,
+            )
+        self._judge(candidate, t, k)
 
-        if live.guarding("fallback") and record.fallback_at is None and (
-            monitor.failed() or rejections >= live.reject_patience
+    def _judge(self, candidate: DSACAgent, t: int, k: int) -> None:
+        """Test ``candidate`` against the incumbent, log the verdict, adopt on a pass.
+
+        ``k`` is the rollout length the candidate was trained on, logged with the
+        verdict.
+        """
+        live = self.live
+        risk = live.accept_risk or self.config.risk
+        test = (
+            _accept(
+                candidate,
+                self.agent,
+                self.rollouts,
+                self.real,
+                live,
+                risk=risk,
+                rng_seed=live.seed + t,
+                half=self.test_half,
+            )
+            if live.guarding("accept")
+            else AcceptTest(margin=0.0, error=0.0, accepted=True)
+        )
+        # The same comparison on the states the candidate was rolled from.
+        # It decides nothing -- it is the in-sample twin of the margin that
+        # does, and the gap between the two is what "the candidate learned
+        # these particular states" looks like when it is measured rather
+        # than assumed.
+        insample = (
+            _accept(
+                candidate,
+                self.agent,
+                self.rollouts,
+                self.real,
+                live,
+                risk=risk,
+                rng_seed=live.seed + t,
+                half=self.fit_half,
+            ).margin
+            if live.holdout_branches and live.guarding("accept")
+            else None
+        )
+        accepted = test.accepted
+        # What the test was asked to resolve, alongside its verdict: a step
+        # smaller than the test's own error is not a rejected improvement,
+        # it is an improvement nobody could have measured.
+        step_size, drift = _displacement(
+            candidate, self.agent, self.frozen, self.real, live, self.rng
+        )
+        self.record.events_.append(
+            {
+                "step": t,
+                "kind": "accepted" if accepted else "rejected",
+                "k": k,
+                "margin": test.margin,
+                **({} if insample is None else {"margin_insample": insample}),
+                "error": test.error,
+                "move": step_size,
+                "drift": drift,
+            }
+        )
+        if accepted:
+            self.agent, self.rejections = candidate, 0
+        else:
+            self.rejections += 1
+
+    def maybe_fall_back(self, t: int, *, verbose: bool) -> None:
+        """Hand control back to the frozen agent if the run has gone badly enough."""
+        record = self.record
+        if (
+            self.live.guarding("fallback")
+            and record.fallback_at is None
+            and (self.monitor.failed() or self.rejections >= self.live.reject_patience)
         ):
-            agent = frozen
+            self.agent = self.frozen
             record.fallback_at = t
             record.events_.append({"step": t, "kind": "fallback"})
             if verbose:
                 print(f"  [{t:>3}] control handed back to the frozen offline agent")
-
-        obs = next_obs
-        if truncated:
-            break
-
-    if verbose:
-        print(
-            f"  {record.name}: return {record.total:9.1f} over {len(record)} steps"
-            + ("  COLLAPSED" if record.collapsed else "")
-        )
-    return record
 
 
 #: The feedback gains each named Taylor reference is run at.
@@ -1206,16 +1438,24 @@ def run_reference(
     competitors under its constraints.
     """
     env = build_truth_env(
-        result.world, result.observer, result.env.reward,
-        free_instrument(result.config), seed=seed, horizon=live.live_steps,
+        result.world,
+        result.observer,
+        result.env.reward,
+        free_instrument(result.config),
+        seed=seed,
+        horizon=live.live_steps,
     )
     model = result.world.config.model
     gains = result.world.config.spec.reference_gains
     if policy_name in gains:
         phi_pi, phi_y = gains[policy_name]
         policy = taylor_policy(
-            env, result.observer, dt=result.config.dt,
-            pi_target=result.config.pi_target, phi_pi=phi_pi, phi_y=phi_y,
+            env,
+            result.observer,
+            dt=result.config.dt,
+            pi_target=result.config.pi_target,
+            phi_pi=phi_pi,
+            phi_y=phi_y,
             model=model,
         )
     elif policy_name == "calibration":
@@ -1259,7 +1499,7 @@ def _rehearse_one(
     live: LiveConfig,
     seeds: tuple[np.ndarray, np.ndarray],
     references: tuple[str, ...],
-    oracle: "OracleConfig | None",
+    oracle: OracleConfig | None,
     *,
     seed: int,
     verbose: bool,
@@ -1278,8 +1518,13 @@ def _rehearse_one(
     out: dict[str, RunRecord] = {}
     for adapt in (True, False):
         record = deploy(
-            result, episode, live, seed_rows=seeds, seed=seed,
-            adapt=adapt, verbose=verbose,
+            result,
+            episode,
+            live,
+            seed_rows=seeds,
+            seed=seed,
+            adapt=adapt,
+            verbose=verbose,
         )
         out[record.name] = record
     for name in references:
@@ -1293,9 +1538,7 @@ def _rehearse_one(
         # back the other way.
         from control.live.oracle import optimal_run
 
-        record = optimal_run(
-            result, episode, live, oracle, seed=seed, verbose=verbose
-        )
+        record = optimal_run(result, episode, live, oracle, seed=seed, verbose=verbose)
         out["optimal"] = record
         if verbose:
             print(f"  optimal: return {record.total:9.1f} over {len(record)} steps")
@@ -1313,7 +1556,7 @@ def _worker_init(
     live: LiveConfig,
     seeds: tuple[np.ndarray, np.ndarray],
     references: tuple[str, ...],
-    oracle: "OracleConfig | None",
+    oracle: OracleConfig | None,
 ) -> None:
     """Receive the (pickled) offline stack once per worker, not once per future."""
     global _WORKER
@@ -1324,7 +1567,9 @@ def _worker_init(
     _WORKER = (result, live, seeds, references, oracle)
 
 
-def _worker_rehearse(j: int, episode: Episode, seed: int) -> tuple[int, dict[str, RunRecord]]:
+def _worker_rehearse(
+    j: int, episode: Episode, seed: int
+) -> tuple[int, dict[str, RunRecord]]:
     """One future's rehearsal inside a worker, tagged with its position."""
     assert _WORKER is not None, "worker used before _worker_init"
     result, live, seeds, references, oracle = _WORKER
@@ -1340,7 +1585,7 @@ def rehearse(
     futures: int = 8,
     first: int | None = None,
     references: tuple[str, ...] = ("taylor", "calibration"),
-    oracle: "OracleConfig | None" = None,
+    oracle: OracleConfig | None = None,
     workers: int = 1,
     verbose: bool = True,
 ) -> RehearsalResult:
@@ -1398,20 +1643,13 @@ def rehearse(
     nested pools oversubscribe.
     """
     live = live or LiveConfig()
-    dedicated = len(result.world.deploy_futures) > 0
-    pool = result.world.deploy_futures if dedicated else result.world.eval_futures
-    if first is None:
-        first = 0 if dedicated else result.config.eval_episodes
-    bank = pool.all()[first : first + futures]
-    if not bank:
-        raise ValueError(
-            f"no futures at [{first}:{first + futures}] of a "
-            f"{'deployment' if dedicated else 'eval'} bank of {len(pool)}"
-        )
+    bank, first = _rehearsal_bank(result, futures, first)
     seeds = residual_seed(result, live, verbose=verbose)
     out = RehearsalResult(config=live)
     names = (
-        "adapting", "frozen", *references,
+        "adapting",
+        "frozen",
+        *references,
         *(("optimal",) if oracle is not None else ()),
     )
     out.runs_ = {name: [] for name in names}
@@ -1424,43 +1662,124 @@ def rehearse(
         pool_size = 1
 
     if pool_size == 1:
-        rehearsed = []
-        for j, episode in enumerate(bank):
-            if verbose:
-                print(f"rehearsal {j + 1}/{len(bank)}: future #{episode.index}")
-            rehearsed.append(
-                _rehearse_one(
-                    result, episode, live, seeds, references, oracle,
-                    seed=first + j, verbose=verbose,
-                )
-            )
+        rehearsed = _rehearse_serial(
+            result, bank, live, seeds, references, oracle, first, verbose=verbose
+        )
     else:
-        # The futures are the parallelism, so the oracle inside each worker
-        # keeps to one process -- a pool of pools oversubscribes the machine.
-        oracle_one = None if oracle is None else replace(oracle, workers=1)
-        rehearsed = [None] * len(bank)
-        with managed_pool(
+        rehearsed = _rehearse_parallel(
+            result,
+            bank,
+            live,
+            seeds,
+            references,
+            oracle,
+            first,
             pool_size,
-            initializer=_worker_init,
-            initargs=(result, live, seeds, references, oracle_one),
-        ) as pool:
-            pending = {
-                pool.submit(_worker_rehearse, j, episode, first + j)
-                for j, episode in enumerate(bank)
-            }
-            for done in as_completed(pending):
-                j, records = done.result()
-                rehearsed[j] = records
-                if verbose:
-                    line = ", ".join(
-                        f"{name} {records[name].total:.1f}" for name in names
-                    )
-                    print(f"rehearsal of future #{bank[j].index}: {line}")
+            names,
+            verbose=verbose,
+        )
 
     for records in rehearsed:
         for name in names:
             out.runs_[name].append(records[name])
     return out
+
+
+def _rehearsal_bank(
+    result: TrainingResult, futures: int, first: int | None
+) -> tuple[list[Episode], int]:
+    """The ``futures`` episodes a rehearsal runs on, and the bank offset they start at.
+
+    The deployment bank from its start when the world drew one, otherwise the
+    eval bank from ``first`` (defaulting to the first future the offline run
+    never scored) -- see :func:`rehearse`.
+    """
+    dedicated = len(result.world.deploy_futures) > 0
+    pool = result.world.deploy_futures if dedicated else result.world.eval_futures
+    if first is None:
+        first = 0 if dedicated else result.config.eval_episodes
+    bank = pool.all()[first : first + futures]
+    if not bank:
+        raise ValueError(
+            f"no futures at [{first}:{first + futures}] of a "
+            f"{'deployment' if dedicated else 'eval'} bank of {len(pool)}"
+        )
+    return bank, first
+
+
+def _rehearse_serial(
+    result: TrainingResult,
+    bank: Sequence[Episode],
+    live: LiveConfig,
+    seeds: tuple[np.ndarray, np.ndarray],
+    references: tuple[str, ...],
+    oracle: OracleConfig | None,
+    first: int,
+    *,
+    verbose: bool,
+) -> list[dict[str, RunRecord]]:
+    """Rehearse every future of ``bank`` in turn, in this process.
+
+    Future ``j`` is seeded ``first + j``; returns one record set per future, in
+    bank order.
+    """
+    rehearsed = []
+    for j, episode in enumerate(bank):
+        if verbose:
+            print(f"rehearsal {j + 1}/{len(bank)}: future #{episode.index}")
+        rehearsed.append(
+            _rehearse_one(
+                result,
+                episode,
+                live,
+                seeds,
+                references,
+                oracle,
+                seed=first + j,
+                verbose=verbose,
+            )
+        )
+    return rehearsed
+
+
+def _rehearse_parallel(
+    result: TrainingResult,
+    bank: Sequence[Episode],
+    live: LiveConfig,
+    seeds: tuple[np.ndarray, np.ndarray],
+    references: tuple[str, ...],
+    oracle: OracleConfig | None,
+    first: int,
+    pool_size: int,
+    names: tuple[str, ...],
+    *,
+    verbose: bool,
+) -> list[dict[str, RunRecord]]:
+    """Rehearse the futures of ``bank`` across ``pool_size`` worker processes.
+
+    Seeded as :func:`_rehearse_serial` and returned in the same bank order;
+    ``verbose`` prints each future's ``names`` totals as it completes.
+    """
+    # The futures are the parallelism, so the oracle inside each worker
+    # keeps to one process -- a pool of pools oversubscribes the machine.
+    oracle_one = None if oracle is None else replace(oracle, workers=1)
+    rehearsed: dict[int, dict[str, RunRecord]] = {}
+    with managed_pool(
+        pool_size,
+        initializer=_worker_init,
+        initargs=(result, live, seeds, references, oracle_one),
+    ) as pool:
+        pending = {
+            pool.submit(_worker_rehearse, j, episode, first + j)
+            for j, episode in enumerate(bank)
+        }
+        for done in as_completed(pending):
+            j, records = done.result()
+            rehearsed[j] = records
+            if verbose:
+                line = ", ".join(f"{name} {records[name].total:.1f}" for name in names)
+                print(f"rehearsal of future #{bank[j].index}: {line}")
+    return [rehearsed[j] for j in range(len(bank))]
 
 
 # -- the pieces of one update ------------------------------------------------
@@ -1488,7 +1807,10 @@ def _generate(
 
 
 def _mix(
-    real: RealBuffer, synthetic: ReplayBuffer, live: LiveConfig, rng: np.random.Generator
+    real: RealBuffer,
+    synthetic: ReplayBuffer,
+    live: LiveConfig,
+    rng: np.random.Generator,
 ) -> Batch:
     """A minibatch mixed from the two buffers, never a merged buffer.
 
@@ -1638,7 +1960,9 @@ def _accept(
         scores[name] = np.array(
             [
                 rollouts.roll(
-                    b, policy, live.accept_horizon,
+                    b,
+                    policy,
+                    live.accept_horizon,
                     np.random.default_rng(rng_seed + 1 + i),
                 )[0]
                 for i, b in enumerate(branches)
@@ -1720,15 +2044,15 @@ class _OutcomeTracker:
         self, state: State, parameters: Parameters, actions: Actions
     ) -> dict[str, float]:
         """One period's levers and outcomes, ready to go into a log row."""
-        pars = parameters.to_dict()
-        growth = np.log(state.Yk / self.prev_yk) / self.dt
+        pars, levels = parameters.to_dict(), state.to_dict()
+        growth = np.log(levels["Yk"] / self.prev_yk) / self.dt
         labour = np.log(pars["Nfe"] / self.prev_nfe) / self.dt
         row = {
             "growth": float(growth),
             "potential": float(pars["GRpr"] + labour),
-            "ER": float(state.ER),
-            "PI": float(state.PI),
+            "ER": float(levels["ER"]),
+            "PI": float(levels["PI"]),
             **{name: float(getattr(actions, name)) for name in self._action_names},
         }
-        self.prev_yk, self.prev_nfe = float(state.Yk), float(pars["Nfe"])
+        self.prev_yk, self.prev_nfe = float(levels["Yk"]), float(pars["Nfe"])
         return row

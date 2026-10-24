@@ -134,7 +134,10 @@ def gensys(
 
     top = tmat @ aa
     bottom = np.hstack(
-        [np.zeros((n_unstable, n_stable), dtype=complex), np.eye(n_unstable, dtype=complex)]
+        [
+            np.zeros((n_unstable, n_stable), dtype=complex),
+            np.eye(n_unstable, dtype=complex),
+        ]
     )
     big0 = np.vstack([top, bottom])
     big1 = np.vstack([tmat @ bb, np.zeros((n_unstable, n), dtype=complex)])
@@ -144,7 +147,9 @@ def gensys(
     # only contribution is the deterministic constant.
     unstable = slice(n_stable, n)
     a2, b2 = aa[unstable, unstable], bb[unstable, unstable]
-    forward_c = np.linalg.solve(a2 - b2, q2 @ c) if n_unstable else np.zeros(0, dtype=complex)
+    forward_c = (
+        np.linalg.solve(a2 - b2, q2 @ c) if n_unstable else np.zeros(0, dtype=complex)
+    )
 
     transition = big0_inv @ big1
     constant = big0_inv @ np.concatenate([tmat @ q @ c, forward_c])

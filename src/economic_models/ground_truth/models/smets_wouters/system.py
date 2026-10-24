@@ -25,8 +25,8 @@ never drift apart.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Mapping, Sequence
 
 import numpy as np
 
@@ -52,7 +52,9 @@ class GensysForm:
     g1: np.ndarray
     psi: np.ndarray
     pi: np.ndarray  #: (n, n_eta) loading on the endogenous forecast errors
-    variables: tuple[str, ...]  #: the model's variables, then the ``E[...]`` auxiliaries
+    variables: tuple[
+        str, ...
+    ]  #: the model's variables, then the ``E[...]`` auxiliaries
     shocks: tuple[str, ...]
 
 
@@ -110,11 +112,21 @@ class LinearSystem:
             table = self._index if group == "variable" else self._shock_index
             unknown = [k for k in keys if k not in table]
             if unknown:
-                raise ValueError(f"equation {name!r}: unknown {group}(s) {sorted(unknown)}")
-        self._equations.append(_Equation(name, dict(cur), dict(lag), dict(lead), dict(shock), const))
+                raise ValueError(
+                    f"equation {name!r}: unknown {group}(s) {sorted(unknown)}"
+                )
+        self._equations.append(
+            _Equation(name, dict(cur), dict(lag), dict(lead), dict(shock), const)
+        )
 
     def exogenous(
-        self, name: str, *, rho: float, shock: str, ma: str | None = None, ma_weight: float = 0.0
+        self,
+        name: str,
+        *,
+        rho: float,
+        shock: str,
+        ma: str | None = None,
+        ma_weight: float = 0.0,
     ) -> None:
         """Declare ``name`` an AR(1) (or ARMA(1,1)) process driven by ``shock``.
 
@@ -175,7 +187,9 @@ class LinearSystem:
         """
         n, m = self._require_square()
         expected = tuple(
-            name for name in self.variables if any(name in eq.lead for eq in self._equations)
+            name
+            for name in self.variables
+            if any(name in eq.lead for eq in self._equations)
         )
         aux = {name: n + i for i, name in enumerate(expected)}
         total = n + len(expected)
@@ -203,7 +217,14 @@ class LinearSystem:
             g1[row, aux[name]] = 1.0
             pi[row, k] = 1.0
 
-        return GensysForm(g0, g1, psi, pi, (*self.variables, *(f"E[{x}]" for x in expected)), self.shocks)
+        return GensysForm(
+            g0,
+            g1,
+            psi,
+            pi,
+            (*self.variables, *(f"E[{x}]" for x in expected)),
+            self.shocks,
+        )
 
     # -- internals ---------------------------------------------------------
 

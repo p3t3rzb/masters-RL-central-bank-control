@@ -27,9 +27,9 @@ the only data a proxy or an observation is ever fit on.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Mapping
-
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from control.dsac.train import Policy, taylor_policy
 from control.env import CentralBankEnv
@@ -69,7 +69,7 @@ class TunablePolicy(ABC):
     # -- realising a draw ----------------------------------------------------
 
     def prepare(
-        self, params: Mapping[str, Any], fold: "Fold", config: "TuningConfig"
+        self, params: Mapping[str, Any], fold: Fold, config: TuningConfig
     ) -> Any:
         """Turn one draw of the hyperparameters into whatever :meth:`build` needs.
 
@@ -192,9 +192,7 @@ class TaylorTuning(TunablePolicy):
         dt: float,
     ) -> Policy:
         """The rule itself, bound to this environment and its observer."""
-        return taylor_policy(
-            env, observer, dt=dt, pi_target=self.pi_target, **prepared
-        )
+        return taylor_policy(env, observer, dt=dt, pi_target=self.pi_target, **prepared)
 
 
 #: The policy families a search may be run over, by command-line name.

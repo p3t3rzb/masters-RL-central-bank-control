@@ -10,26 +10,6 @@ from pysolve.model import Model
 
 from economic_models.ground_truth.base import PysolveEconomicModel
 from economic_models.ground_truth.models.growth.calibration import GrowthCalibration
-from economic_models.ground_truth.models.growth.variables import (
-    GrowthActions,
-    GrowthParameters,
-    GrowthState,
-)
-from economic_models.ground_truth.models.growth.modules.firms import (
-    add_firms_equations,
-    add_firms_params,
-    add_firms_variables,
-)
-from economic_models.ground_truth.models.growth.modules.households import (
-    add_households_equations,
-    add_households_params,
-    add_households_variables,
-)
-from economic_models.ground_truth.models.growth.modules.government import (
-    add_government_equations,
-    add_government_params,
-    add_government_variables,
-)
 from economic_models.ground_truth.models.growth.modules.central_bank import (
     add_central_bank_equations,
     add_central_bank_params,
@@ -39,6 +19,26 @@ from economic_models.ground_truth.models.growth.modules.commercial_banks import 
     add_commercial_banks_equations,
     add_commercial_banks_params,
     add_commercial_banks_variables,
+)
+from economic_models.ground_truth.models.growth.modules.firms import (
+    add_firms_equations,
+    add_firms_params,
+    add_firms_variables,
+)
+from economic_models.ground_truth.models.growth.modules.government import (
+    add_government_equations,
+    add_government_params,
+    add_government_variables,
+)
+from economic_models.ground_truth.models.growth.modules.households import (
+    add_households_equations,
+    add_households_params,
+    add_households_variables,
+)
+from economic_models.ground_truth.models.growth.variables import (
+    GrowthActions,
+    GrowthParameters,
+    GrowthState,
 )
 
 
@@ -78,9 +78,7 @@ class GrowthModel(PysolveEconomicModel):
         self.calibration = (
             calibration if calibration is not None else GrowthCalibration.baseline()
         )
-        super().__init__(
-            iterations=iterations, threshold=threshold, **param_overrides
-        )
+        super().__init__(iterations=iterations, threshold=threshold, **param_overrides)
 
     def _seed(self, model: Model) -> None:
         """Seed the baseline calibration; constructor overrides are applied after."""

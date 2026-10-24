@@ -31,20 +31,25 @@ the agent actually produced.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Mapping, Sequence
 
 import numpy as np
 
 from economic_models.ground_truth.excitation.base import ExcitationConfig
+from economic_models.ground_truth.excitation.specs import (
+    ExcitationJitter,
+    SpendingResponse,
+)
+from economic_models.ground_truth.models.growth import GrowthExcitationConfig
+from economic_models.ground_truth.models.smets_wouters.excitation import (
+    SwExcitationConfig,
+)
 from economic_models.ground_truth.registry import (
     DEFAULT_MODEL,
     GroundTruthSpec,
     ground_truth,
 )
-from economic_models.ground_truth.excitation.base import BranchCapture
-from economic_models.ground_truth.excitation.specs import ExcitationJitter
-from economic_models.ground_truth.excitation.specs import SpendingResponse
 from economic_models.run import Run, Scenario
 
 #: The excitation presets a world may be built with.
@@ -141,22 +146,39 @@ class WorldConfig:
 
     def __post_init__(self) -> None:
         """Validate the configuration eagerly, before any expensive generation."""
+        self._validate_scalars()
+        self._validate_starts()
+        if self.deploys_differently and self.n_deploy_futures < 1:
+            raise ValueError(
+                "a deployment economy was configured but no bank was asked for: "
+                "set n_deploy_futures"
+            )
+
+    def _validate_scalars(self) -> None:
+        """Check the presets, step length, sizes and jitter are each in range."""
         for name in ("excitation", "deploy_excitation"):
             value = getattr(self, name)
             if value is not None and value not in EXCITATIONS:
-                raise ValueError(
-                    f"{name} must be one of {EXCITATIONS}, got {value!r}"
-                )
+                raise ValueError(f"{name} must be one of {EXCITATIONS}, got {value!r}")
         if self.dt <= 0:
             raise ValueError(f"dt must be positive, got {self.dt}")
         for name in ("history_steps", "horizon", "n_train_futures"):
             if getattr(self, name) < 1:
-                raise ValueError(f"{name} must be at least 1, got {getattr(self, name)}")
+                raise ValueError(
+                    f"{name} must be at least 1, got {getattr(self, name)}"
+                )
         for name in ("n_eval_futures", "n_deploy_futures"):
             if getattr(self, name) < 0:
-                raise ValueError(f"{name} must be non-negative, got {getattr(self, name)}")
+                raise ValueError(
+                    f"{name} must be non-negative, got {getattr(self, name)}"
+                )
         if self.deploy_jitter < 0.0:
-            raise ValueError(f"deploy_jitter must be non-negative, got {self.deploy_jitter}")
+            raise ValueError(
+                f"deploy_jitter must be non-negative, got {self.deploy_jitter}"
+            )
+
+    def _validate_starts(self) -> None:
+        """Check the start points fit in the history and the training bank."""
         if self.n_starts < 1:
             raise ValueError(f"n_starts must be at least 1, got {self.n_starts}")
         if self.start_burn_in < 0:
@@ -172,11 +194,6 @@ class WorldConfig:
             raise ValueError(
                 f"{self.n_starts} start points but only {self.n_train_futures} "
                 "training futures to spread over them"
-            )
-        if self.deploys_differently and self.n_deploy_futures < 1:
-            raise ValueError(
-                "a deployment economy was configured but no bank was asked for: "
-                "set n_deploy_futures"
             )
 
     @property
@@ -195,7 +212,7 @@ class WorldConfig:
         """The ground-truth model this world is built on."""
         return ground_truth(self.model)
 
-    def excitation_config(self) -> ExcitationConfig:
+    def excitation_config(self) -> GrowthExcitationConfig | SwExcitationConfig:
         """The excitation preset named by :attr:`excitation`."""
         return self.spec.excitation_config(self.excitation)
 
@@ -298,7 +315,9 @@ class FiscalStabilizer:
         """A copy of the parameter row with ``GRg`` responding to ``er_prev``."""
         stabilized = params.astype(float).copy()
         stabilized[self._target] = float(
-            np.clip(stabilized[self._target] + self.spec.support(er_prev), *self.spec.bounds)
+            np.clip(
+                stabilized[self._target] + self.spec.support(er_prev), *self.spec.bounds
+            )
         )
         return stabilized
 
@@ -359,7 +378,9 @@ class EpisodeBank:
         several start points).
         """
         if branches is None or isinstance(branches, BranchPoint):
-            branches = [branches] * len(futures)
+            # ``None`` (a bank built without a branch, e.g. an empty one) is
+            # carried onto the episodes as-is; ``branch_rows`` skips it.
+            branches = [branches] * len(futures)  # type: ignore[list-item]
         elif len(branches) != len(futures):
             raise ValueError(
                 f"{len(branches)} branch points for {len(futures)} futures"
@@ -425,7 +446,9 @@ class TrainingWorld:
         """The history rows training episodes fork from, in order."""
         return self.train_futures.branch_rows
 
-    def window(self, rows: int, end: int | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def window(
+        self, rows: int, end: int | None = None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """The ``rows`` level rows of the history ending at ``end``: a warm start.
 
         ``end`` is an *exclusive* bound defaulting to the whole history, so the
@@ -461,7 +484,9 @@ def start_rows(config: WorldConfig) -> tuple[int, ...]:
     return tuple(sorted({int(round(r)) for r in rows}))
 
 
-def build_world(config: WorldConfig | None = None, *, verbose: bool = True) -> TrainingWorld:
+def build_world(
+    config: WorldConfig | None = None, *, verbose: bool = True
+) -> TrainingWorld:
     """Simulate the history once and fork the futures that branch off its end.
 
     Only the history solves the structural model; the futures are drawn from the
@@ -528,8 +553,8 @@ def build_world(config: WorldConfig | None = None, *, verbose: bool = True) -> T
             ""
             if not config.n_deploy_futures
             else f" / {config.n_deploy_futures} deploy futures "
-                 f"({config.deploy_excitation or config.excitation} excitation"
-                 f"{jittered})"
+            f"({config.deploy_excitation or config.excitation} excitation"
+            f"{jittered})"
         )
         started = (
             ""

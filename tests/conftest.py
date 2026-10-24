@@ -31,7 +31,9 @@ TIERS = ("unit", "integration", "e2e")
 _ROOT = Path(__file__).parent
 
 
-def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
     """Mark every collected test with the tier of the directory it lives in."""
     for item in items:
         tier = item.path.relative_to(_ROOT).parts[0]

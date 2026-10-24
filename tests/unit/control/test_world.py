@@ -92,7 +92,9 @@ def test_multiple_starts_span_burn_in_to_end():
 
 def _scenarios(n: int, steps: int = 4) -> list[Scenario]:
     """``n`` scenarios whose parameter rows encode their position in the list."""
-    return [Scenario(params=np.full((steps, len(PARAM_NAMES)), float(j))) for j in range(n)]
+    return [
+        Scenario(params=np.full((steps, len(PARAM_NAMES)), float(j))) for j in range(n)
+    ]
 
 
 def test_bank_numbers_episodes_from_its_offset():
@@ -131,7 +133,9 @@ def test_bank_draws_its_own_futures():
 @pytest.fixture
 def stabilizer() -> FiscalStabilizer:
     """GROWTH's stabilizer at gain 0.5, clipped to ``[-2%, 8%]``."""
-    spec = GovSpendingSpec(gap_sigma=0.01, gap_clip=0.02, stabilizer=0.5, bounds=(-0.02, 0.08))
+    spec = GovSpendingSpec(
+        gap_sigma=0.01, gap_clip=0.02, stabilizer=0.5, bounds=(-0.02, 0.08)
+    )
     return FiscalStabilizer(spec, PARAM_NAMES)
 
 

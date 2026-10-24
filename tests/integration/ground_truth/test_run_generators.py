@@ -59,8 +59,13 @@ def test_run_is_a_pure_function_of_its_seed(generator, run):
 def test_unexcited_run_holds_inputs_at_baseline(generator):
     """``excite=False`` is the steady-growth reference: inputs never move."""
     reference = generator.generate(10, excite=False)
-    np.testing.assert_allclose(reference.params, np.broadcast_to(reference.params[0], reference.params.shape))
-    np.testing.assert_allclose(reference.actions, np.broadcast_to(reference.actions[0], reference.actions.shape))
+    np.testing.assert_allclose(
+        reference.params, np.broadcast_to(reference.params[0], reference.params.shape)
+    )
+    np.testing.assert_allclose(
+        reference.actions,
+        np.broadcast_to(reference.actions[0], reference.actions.shape),
+    )
     assert reference.volatility is None
 
 
@@ -71,7 +76,9 @@ def test_continuations_branch_off_the_same_main_run(generator, run):
     )
     np.testing.assert_array_equal(main.states, run.states)
     assert [len(s) for s in scenarios] == [6, 6, 6]
-    assert all(s.hidden.shape == (6, len(generator.config.hidden_names)) for s in scenarios)
+    assert all(
+        s.hidden.shape == (6, len(generator.config.hidden_names)) for s in scenarios
+    )
     assert all(s.dt == generator.dt for s in scenarios)
     assert branch and all(np.isfinite(v) for v in branch.values())
 
@@ -106,4 +113,8 @@ def test_branch_rows_must_match_the_continuation_count(generator):
 def test_collapse_policy_is_validated(spec):
     """``on_collapse`` is ``'raise'`` or ``'truncate'`` and nothing else."""
     with pytest.raises(ValueError, match="on_collapse"):
-        spec.generator(spec.excitation_config("default"), dt=spec.fixed_dt or 1.0, on_collapse="ignore")
+        spec.generator(
+            spec.excitation_config("default"),
+            dt=spec.fixed_dt or 1.0,
+            on_collapse="ignore",
+        )

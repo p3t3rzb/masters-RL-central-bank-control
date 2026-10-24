@@ -89,8 +89,13 @@ class OODMonitor:
     trips_: int = field(default=0, init=False)
 
     def update(
-        self, step: int, variance: np.ndarray, residual: np.ndarray, obs: np.ndarray,
-        *, clip: float = 10.0,
+        self,
+        step: int,
+        variance: np.ndarray,
+        residual: np.ndarray,
+        obs: np.ndarray,
+        *,
+        clip: float = 10.0,
     ) -> MonitorReading:
         """Fold in one live step and return what it read.
 
@@ -105,7 +110,8 @@ class OODMonitor:
         clipped = float(np.mean(np.abs(np.asarray(obs)) >= clip - 1e-9))
 
         over_variance = (
-            self.variance_ref_ is not None and v > self.variance_factor * self.variance_ref_
+            self.variance_ref_ is not None
+            and v > self.variance_factor * self.variance_ref_
         )
         z = 0.0
         if self.residual_mean_ is not None:
@@ -150,7 +156,8 @@ class OODMonitor:
         """Advance the exponentially weighted reference scales."""
         k = self.kappa
         self.variance_ref_ = (
-            variance if self.variance_ref_ is None
+            variance
+            if self.variance_ref_ is None
             else (1.0 - k) * self.variance_ref_ + k * variance
         )
         if self.residual_mean_ is None:

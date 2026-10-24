@@ -12,7 +12,11 @@ import pytest
 import torch
 
 from control.dsac.agent import DSACAgent
-from control.dsac.networks import GainCorrectedPolicy, QuantileCritic, SquashedGaussianPolicy
+from control.dsac.networks import (
+    GainCorrectedPolicy,
+    QuantileCritic,
+    SquashedGaussianPolicy,
+)
 from control.dsac.replay import Batch, ReplayBuffer
 from control.dsac.risk import CVaRRisk, MeanRisk
 
@@ -61,7 +65,11 @@ def _fill(buffer: ReplayBuffer, n: int) -> None:
     """Add ``n`` transitions whose every field encodes its insertion index."""
     for i in range(n):
         buffer.add(
-            np.full(OBS_DIM, i), np.full(ACTION_DIM, i), float(i), np.full(OBS_DIM, i), i % 2 == 0
+            np.full(OBS_DIM, i),
+            np.full(ACTION_DIM, i),
+            float(i),
+            np.full(OBS_DIM, i),
+            i % 2 == 0,
         )
 
 
@@ -99,7 +107,9 @@ def test_replay_batch_is_row_aligned():
     assert batch.action.shape == (64, ACTION_DIM)
     assert batch.reward.shape == batch.done.shape == (64, 1)
     np.testing.assert_array_equal(batch.obs[:, 0], batch.reward[:, 0])
-    np.testing.assert_array_equal(batch.done[:, 0], (batch.reward[:, 0] % 2 == 0).astype(np.float32))
+    np.testing.assert_array_equal(
+        batch.done[:, 0], (batch.reward[:, 0] % 2 == 0).astype(np.float32)
+    )
 
 
 # -- networks ----------------------------------------------------------------
@@ -188,7 +198,9 @@ def test_agent_acts_inside_the_box(agent):
 def test_greedy_action_is_deterministic(agent):
     """Evaluation must not depend on the sampler's state."""
     obs = np.ones(OBS_DIM)
-    np.testing.assert_array_equal(agent.act(obs, deterministic=True), agent.act(obs, deterministic=True))
+    np.testing.assert_array_equal(
+        agent.act(obs, deterministic=True), agent.act(obs, deterministic=True)
+    )
 
 
 def test_update_moves_every_network_and_reports_finite_losses(agent):

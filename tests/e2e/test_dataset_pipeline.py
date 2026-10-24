@@ -80,7 +80,9 @@ def test_groups_have_the_configured_shape(dataset):
 def test_generation_is_reproducible(dataset, tmp_path):
     """The same base seed writes the same histories, whatever directory it lands in."""
     config, _, root = dataset
-    again = DatasetConfig(**{**storage.config_to_dict(config), "output_dir": str(tmp_path)})
+    again = DatasetConfig(
+        **{**storage.config_to_dict(config), "output_dir": str(tmp_path)}
+    )
     generate_dataset(again, verbose=False)
     first = storage.load_run(storage.main_path(root, "test", 1))
     second = storage.load_run(storage.main_path(tmp_path, "test", 1))
@@ -98,7 +100,9 @@ def test_a_loaded_group_drives_the_ground_truth(dataset):
     observer = Observer(spec.interface).fit(world.history)
     reward = MandateReward(employment_target=spec.employment_target)
     train_config = free_instrument(
-        TrainConfig(model=config.model, dt=config.dt, horizon=config.continuation_length)
+        TrainConfig(
+            model=config.model, dt=config.dt, horizon=config.continuation_length
+        )
     )
     env = build_truth_env(world, observer, reward, train_config)
     policy = constant_policy(env, calibration_actions(config.model))

@@ -7,7 +7,9 @@ policy rate on bills and the long-term rate and bond price it anchors).
 
 from pysolve.model import Model
 
-from economic_models.ground_truth.models.growth.modules.conventions import NOMINAL_YEAR_AGO
+from economic_models.ground_truth.models.growth.modules.conventions import (
+    NOMINAL_YEAR_AGO,
+)
 from economic_models.ground_truth.models.growth.variables import (
     GrowthActions,
     GrowthParameters,

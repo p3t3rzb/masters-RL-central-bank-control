@@ -63,14 +63,15 @@ than a separate code path.
 
 from __future__ import annotations
 
-from typing import Any, Self, Sequence
+from collections.abc import Sequence
+from typing import Any, Self
 
 import numpy as np
 
 from economic_models.encoders import NullEncoder, StateEncoder
-from economic_models.run import Run
 from economic_models.interface import ModelInterface
 from economic_models.proxy import StationarizingTransform
+from economic_models.run import Run
 
 
 class Observer:

@@ -70,7 +70,9 @@ class _MDNNet(nn.Module):
         h = self.body(x)
         n = x.shape[0]
         mu = self.head_mu(h).view(n, self.K, self.D)
-        log_sig = self.head_ls(h).view(n, self.K, self.D).clamp(_LOG_SIG_MIN, _LOG_SIG_MAX)
+        log_sig = (
+            self.head_ls(h).view(n, self.K, self.D).clamp(_LOG_SIG_MIN, _LOG_SIG_MAX)
+        )
         return self.head_pi(h), mu, log_sig
 
 
@@ -136,7 +138,8 @@ class MDNProxy(BaseProxyModel):
         # Column-wise standardisers, fit on the training split.
         self._x_scaler: StandardScaler | None = None
         self._y_scaler: StandardScaler | None = None
-        self.best_epoch_ = self.best_val_ = None
+        self.best_epoch_: int | None = None
+        self.best_val_: float | None = None
         self.history_: list[float] = []  # per-epoch validation NLL
 
     # -- estimation ----------------------------------------------------------
@@ -213,6 +216,7 @@ class MDNProxy(BaseProxyModel):
         forward pass is the only change from a per-row call -- each row's outputs
         are computed independently, so the results are identical.
         """
+        assert self._x_scaler is not None and self.net_ is not None
         xs = self._t(self._x_scaler.transform(X))
         with torch.no_grad():
             logits, mu, log_sig = self.net_(xs)
@@ -224,6 +228,7 @@ class MDNProxy(BaseProxyModel):
         pi, mu, sig = (a[0] for a in self._mixture_batch(x[None, :]))
         k = rng.choice(len(pi), p=pi)
         draw = mu[k] + sig[k] * rng.standard_normal(mu.shape[1])
+        assert self._y_scaler is not None
         return self._y_scaler.inverse_transform(draw[None, :])[0]
 
     def _predict_batch(
@@ -232,10 +237,9 @@ class MDNProxy(BaseProxyModel):
         """Conditional mean ``sum_k pi_k mu_k`` of the predicted mixture, in level-feature space."""
         pi, mu, _ = self._mixture_batch(self._design(z, u_next))
         mean = np.einsum("nk,nkd->nd", pi, mu)  # conditional mean sum_k pi_k mu_k
+        assert self._y_scaler is not None
         return self._y_scaler.inverse_transform(mean)
 
-    def _sample_step(
-        self, ctx: StepContext, rng: np.random.Generator
-    ) -> np.ndarray:
+    def _sample_step(self, ctx: StepContext, rng: np.random.Generator) -> np.ndarray:
         """One draw: pick a component then sample its diagonal Gaussian."""
         return self._sample_feature(self._design(ctx.z, ctx.u_next), rng)

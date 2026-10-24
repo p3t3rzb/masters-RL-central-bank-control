@@ -42,7 +42,7 @@ class GrowthExcitationConfig(ExcitationConfig):
 
     def _perturb_model_specs(
         self, rng: np.random.Generator, jitter: ExcitationJitter
-    ) -> "GrowthExcitationConfig":
+    ) -> GrowthExcitationConfig:
         """Redraw GROWTH's own two specs on top of the generic perturbation."""
         return replace(
             self,
@@ -51,7 +51,7 @@ class GrowthExcitationConfig(ExcitationConfig):
         )
 
     @classmethod
-    def default(cls) -> "GrowthExcitationConfig":
+    def default(cls) -> GrowthExcitationConfig:
         """The calibrated excitation used to generate the training datasets.
 
         Sigmas and clips were tuned so the visible levers move enough to be
@@ -75,10 +75,14 @@ class GrowthExcitationConfig(ExcitationConfig):
             # drift, not policy-scale shocks, and the corridor must survive their
             # worst combinations.
             hidden={
-                "RA": AR1Spec(0.002, -0.008, 0.008),  # expected-sales disturbance (11.2)
+                "RA": AR1Spec(
+                    0.002, -0.008, 0.008
+                ),  # expected-sales disturbance (11.2)
                 "alpha1": AR1Spec(0.004, 0.72, 0.78),  # consume out of income
                 "alpha2": AR1Spec(0.0006, 0.058, 0.070),  # consume out of wealth
-                "gamma0": AR1Spec(0.00015, 0.00022, 0.00222),  # investment animal spirits
+                "gamma0": AR1Spec(
+                    0.00015, 0.00022, 0.00222
+                ),  # investment animal spirits
                 "eta0": AR1Spec(0.001, 0.068, 0.080),  # household new-credit demand
                 "omega3": AR1Spec(0.008, 0.41, 0.50),  # wage adjustment speed
                 "psid": AR1Spec(0.002, 0.14, 0.165),  # dividend payout ratio
@@ -90,7 +94,7 @@ class GrowthExcitationConfig(ExcitationConfig):
         )
 
     @classmethod
-    def calm(cls) -> "GrowthExcitationConfig":
+    def calm(cls) -> GrowthExcitationConfig:
         """:meth:`realistic`'s *variables* under Great-Moderation *weather*.
 
         Exactly the same inputs as :meth:`realistic` -- crucially the same hidden
@@ -124,7 +128,7 @@ class GrowthExcitationConfig(ExcitationConfig):
         return replace(base, hidden=hidden)
 
     @classmethod
-    def realistic(cls) -> "GrowthExcitationConfig":
+    def realistic(cls) -> GrowthExcitationConfig:
         """A crisis-capable excitation resembling a real economy's history.
 
         Extends :meth:`default` along three axes so a single ensemble spans the

@@ -15,8 +15,15 @@ from control.live.monitor import OODMonitor
 OBS = np.zeros(8)
 
 
-def _feed(monitor: OODMonitor, n: int, *, residual: float = 1.0, start: int = 0,
-          obs: np.ndarray = OBS, rng_seed: int = 0) -> None:
+def _feed(
+    monitor: OODMonitor,
+    n: int,
+    *,
+    residual: float = 1.0,
+    start: int = 0,
+    obs: np.ndarray = OBS,
+    rng_seed: int = 0,
+) -> None:
     """Feed ``n`` readings with a mildly noisy residual of the given size."""
     rng = np.random.default_rng(rng_seed)
     for t in range(start, start + n):
@@ -32,7 +39,9 @@ def test_never_trips_inside_the_warmup():
     """
     monitor = OODMonitor(warmup=10, patience=1)
     for t in range(monitor.warmup - 1):
-        monitor.update(t, np.full(4, 1e6 * (t + 1)), np.full(3, 1e6 * (t + 1)), np.full(8, 10.0))
+        monitor.update(
+            t, np.full(4, 1e6 * (t + 1)), np.full(3, 1e6 * (t + 1)), np.full(8, 10.0)
+        )
         assert not monitor.tripped()
     assert not monitor.failed()
 

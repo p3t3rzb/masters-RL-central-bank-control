@@ -11,8 +11,6 @@ training and testing data. :class:`~data_generation.config.DatasetConfig` fixes
 runs, branch states and scenarios on disk.
 """
 
-from economic_models.run import Run, Scenario
-
 from data_generation.config import DatasetConfig
 from data_generation.generate import generate_dataset, plan_tasks
 from data_generation.storage import (
@@ -24,6 +22,7 @@ from data_generation.storage import (
     save_run,
     save_scenario,
 )
+from economic_models.run import Run, Scenario
 
 __all__ = [
     "DatasetConfig",

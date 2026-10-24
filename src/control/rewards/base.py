@@ -16,8 +16,8 @@ deviation, so no single leg dominates the critic.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 from economic_models.variables import Actions, Parameters, State
 

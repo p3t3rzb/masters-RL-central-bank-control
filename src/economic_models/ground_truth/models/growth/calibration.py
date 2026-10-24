@@ -17,8 +17,8 @@ ordering contract lives in one place.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 from pysolve.model import Model
 
@@ -54,7 +54,7 @@ class GrowthCalibration:
         return {**self.structural_params, **self.exogenous_baselines}
 
     @classmethod
-    def baseline(cls) -> "GrowthCalibration":
+    def baseline(cls) -> GrowthCalibration:
         """The book's baseline calibration (Godley & Lavoie, ch. 11)."""
         structural_params = {
             "alpha1": 0.75,  # propensity to consume out of income (11.53)

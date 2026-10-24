@@ -24,9 +24,11 @@ weights then express the mandate's priorities on a common scale.
 from __future__ import annotations
 
 import math
-from typing import Mapping
+from collections.abc import Mapping
+from typing import cast
 
 from control.rewards.base import RewardContext, RewardFunction
+from economic_models.variables import SharedParameters, SharedState
 
 
 class MandateReward(RewardFunction):
@@ -93,10 +95,13 @@ class MandateReward(RewardFunction):
 
     def _terms(self, ctx: RewardContext) -> dict[str, float]:
         """The three squared gaps, scaled and negated."""
+        state = cast(SharedState, ctx.state)
         return {
-            "unemployment": -((self.employment_target - ctx.state.ER) / self.u_scale) ** 2,
-            "growth": -(self._growth_gap(ctx) / self.g_scale) ** 2,
-            "inflation": -((ctx.state.PI - self.pi_target) / self.pi_scale) ** 2,
+            "unemployment": -(
+                ((self.employment_target - state.ER) / self.u_scale) ** 2
+            ),
+            "growth": -((self._growth_gap(ctx) / self.g_scale) ** 2),
+            "inflation": -(((state.PI - self.pi_target) / self.pi_scale) ** 2),
         }
 
     def _growth_gap(self, ctx: RewardContext) -> float:
@@ -106,6 +111,10 @@ class MandateReward(RewardFunction):
         ``dt``; potential is productivity growth plus growth in the
         full-employment labour level, both observed parameters.
         """
-        realised = math.log(ctx.state.Yk / ctx.prev_state.Yk) / ctx.dt
-        labour = math.log(ctx.parameters.Nfe / ctx.prev_parameters.Nfe) / ctx.dt
-        return realised - (ctx.parameters.GRpr + labour)
+        state = cast(SharedState, ctx.state)
+        prev_state = cast(SharedState, ctx.prev_state)
+        params = cast(SharedParameters, ctx.parameters)
+        prev_params = cast(SharedParameters, ctx.prev_parameters)
+        realised = math.log(state.Yk / prev_state.Yk) / ctx.dt
+        labour = math.log(params.Nfe / prev_params.Nfe) / ctx.dt
+        return realised - (params.GRpr + labour)

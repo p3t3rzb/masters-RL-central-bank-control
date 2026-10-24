@@ -95,9 +95,12 @@ def test_transform_spec_is_aligned_with_the_interface(spec):
     """The stationarizing rules name real columns, in the run's column order."""
     interface = spec.interface
     ts = interface.transform_spec
-    state, exog = interface.state.names(), (
-        *interface.parameters.names(),
-        *interface.actions.names(),
+    state, exog = (
+        interface.state.names(),
+        (
+            *interface.parameters.names(),
+            *interface.actions.names(),
+        ),
     )
     assert ts.state_names == state
     assert ts.exog_names == exog

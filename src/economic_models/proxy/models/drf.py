@@ -91,20 +91,20 @@ class DRFProxy(BaseProxyModel):
             order = np.argsort(leaves, kind="stable")
             uniq, starts = np.unique(leaves[order], return_index=True)
             groups = np.split(order, starts[1:])  # member rows, grouped by leaf
-            self._leaf_members.append(
-                {int(u): g for u, g in zip(uniq, groups)}
-            )
+            self._leaf_members.append({int(u): g for u, g in zip(uniq, groups)})
 
     def _predict_batch(
         self, z: np.ndarray, u_next: np.ndarray, f_prev: np.ndarray
     ) -> np.ndarray:
         """Forest conditional-mean predictions for the design rows."""
+        assert self.forest_ is not None
         return self.forest_.predict(self._design(z, u_next))
 
     # -- DRF weights ---------------------------------------------------------
 
     def _weights(self, x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Nonzero DRF weights ``(indices, weights)`` for one query row ``x``."""
+        assert self.forest_ is not None and self._leaf_members is not None
         query_leaves = self.forest_.apply(x[None, :])[0]  # (n_trees,)
         acc: dict[int, float] = {}
         for members, leaf in zip(self._leaf_members, query_leaves):
@@ -118,10 +118,9 @@ class DRFProxy(BaseProxyModel):
 
     # -- inference -----------------------------------------------------------
 
-    def _sample_step(
-        self, ctx: StepContext, rng: np.random.Generator
-    ) -> np.ndarray:
+    def _sample_step(self, ctx: StepContext, rng: np.random.Generator) -> np.ndarray:
         """One draw: resample a whole observed target row with its DRF weight."""
+        assert self._targets is not None
         x = self._design(ctx.z, ctx.u_next)
         idx, wts = self._weights(x)
         draw = idx[rng.choice(len(idx), p=wts)]

@@ -17,6 +17,8 @@ checked at construction.
 
 from __future__ import annotations
 
+from typing import cast
+
 import numpy as np
 
 from economic_models.encoders import GenerativeEncoder
@@ -51,6 +53,11 @@ class EncoderNativeProxy(BaseProxyModel):
                 "pass e.g. KalmanEncoder() or LSTMEncoder()"
             )
 
+    @property
+    def encoder(self) -> GenerativeEncoder:
+        """The generative encoder this proxy forecasts with (checked at construction)."""
+        return cast(GenerativeEncoder, self._encoder)
+
     def _fit(self, data: FitData) -> None:
         """No-op: all fitting lives in the encoder; this proxy only reads its forecast."""
         # All learning is the encoder's; this proxy only reads its forecast.
@@ -75,8 +82,6 @@ class EncoderNativeProxy(BaseProxyModel):
         # semantics.
         return self.encoder.forecast(ctx.belief, ctx.u_next, rng)
 
-    def _sample_step(
-        self, ctx: StepContext, rng: np.random.Generator
-    ) -> np.ndarray:
+    def _sample_step(self, ctx: StepContext, rng: np.random.Generator) -> np.ndarray:
         """One draw from the encoder's predictive distribution about its belief."""
         return self.encoder.forecast(ctx.belief, ctx.u_next, rng)

@@ -56,10 +56,7 @@ class StationarizingTransform:
         # offending series if a non-positive level ever reaches the log.
         self._state_log_diff_names = tuple(n for n in state if n in spec.log_diff)
         self._state_feature_names = tuple(
-            f"dlog({name})" if name in spec.log_diff
-            else f"{name}/{spec.denominator}" if name in spec.ratio_to
-            else name
-            for name in state
+            self._state_feature_name(name, spec) for name in state
         )
 
         exog = self.exog_names
@@ -68,6 +65,19 @@ class StationarizingTransform:
         self._exog_feature_names = tuple(
             f"dlog({name})" if name in spec.exog_log_diff else name for name in exog
         )
+
+    @staticmethod
+    def _state_feature_name(name: str, spec: TransformSpec) -> str:
+        """Human-readable feature name for state column ``name`` under ``spec``.
+
+        ``dlog(name)`` for a log-differenced column, ``name/denominator`` for a
+        ratio column, and the bare ``name`` for one that enters as its level.
+        """
+        if name in spec.log_diff:
+            return f"dlog({name})"
+        if name in spec.ratio_to:
+            return f"{name}/{spec.denominator}"
+        return name
 
     @staticmethod
     def _log(block: np.ndarray, names: tuple[str, ...]) -> np.ndarray:

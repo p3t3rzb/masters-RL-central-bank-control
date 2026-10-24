@@ -294,7 +294,7 @@ class BlockBootstrapForcing(ForcingModel):
     ) -> np.ndarray:
         """Draw blocks until ``k`` steps are covered, cumulated onto ``previous``."""
         assert self._feats is not None
-        drawn = []
+        drawn: list[np.ndarray] = []
         while len(drawn) < k:
             start = int(rng.integers(max(1, len(self._feats) - self.block)))
             drawn.extend(self._feats[start : start + self.block])

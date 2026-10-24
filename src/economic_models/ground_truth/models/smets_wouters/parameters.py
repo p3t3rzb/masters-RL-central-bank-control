@@ -20,8 +20,8 @@ the paper's measurement equation (15) has them.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Mapping
 
 
 @dataclass(frozen=True)
@@ -115,9 +115,9 @@ class SwParams:
     def w_ss(self) -> float:
         """Steady-state real wage, from cost minimisation given ``rk_ss``."""
         a = self.alpha
-        return (
-            a**a * (1.0 - a) ** (1.0 - a) / (self.phi_p * self.rk_ss**a)
-        ) ** (1.0 / (1.0 - a))
+        return (a**a * (1.0 - a) ** (1.0 - a) / (self.phi_p * self.rk_ss**a)) ** (
+            1.0 / (1.0 - a)
+        )
 
     @property
     def k_y(self) -> float:
@@ -159,7 +159,8 @@ class SwParams:
         lower bound expressed as a deviation, which is what the model works in.
         """
         return 100.0 * (
-            self.beta ** (-1) * self.gamma**self.sigma_c * (1.0 + self.pi_bar / 100.0) - 1.0
+            self.beta ** (-1) * self.gamma**self.sigma_c * (1.0 + self.pi_bar / 100.0)
+            - 1.0
         )
 
     # -- derived: equation coefficients ------------------------------------
@@ -278,7 +279,7 @@ class SwParams:
 
     # -- modification ------------------------------------------------------
 
-    def with_values(self, values: Mapping[str, float]) -> "SwParams":
+    def with_values(self, values: Mapping[str, float]) -> SwParams:
         """A copy with ``values`` applied -- how the drifting parameters are set.
 
         Rejects unknown names rather than ignoring them, so a renamed excitation

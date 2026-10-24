@@ -29,13 +29,12 @@ a hundred candidates walk the same prefix.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Iterator, Sequence
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-
-from parallel import guarded_pool, terminate
 
 from control.dataset import group_count, load_world
 from control.drivers import GroundTruthDriver
@@ -43,6 +42,7 @@ from control.dsac.train import evaluate
 from control.env import CentralBankEnv, EnvConfig
 from control.rewards import MandateReward
 from control.world import TrainingWorld
+from parallel import guarded_pool, terminate
 
 if TYPE_CHECKING:  # a policy calls into this module's types, not the other way
     from control.tuning.policies import TunablePolicy
@@ -85,7 +85,9 @@ class TuningConfig:
         """Validate eagerly, before a fold is drawn or a solver is built."""
         for name in ("futures", "block", "iterations"):
             if getattr(self, name) < 1:
-                raise ValueError(f"{name} must be at least 1, got {getattr(self, name)}")
+                raise ValueError(
+                    f"{name} must be at least 1, got {getattr(self, name)}"
+                )
         if self.workers < 0:
             raise ValueError(f"workers must be non-negative, got {self.workers}")
         if self.horizon is not None and self.horizon < 1:
@@ -123,7 +125,7 @@ class Fold:
         """The number of groups in the fold."""
         return len(self.groups)
 
-    def blocks(self, size: int) -> Iterator["Fold"]:
+    def blocks(self, size: int) -> Iterator[Fold]:
         """The fold cut into consecutive chunks of ``size`` groups.
 
         Disjoint rather than cumulative: a caller walking these accumulates the
@@ -219,7 +221,7 @@ def build_env(
 
 
 def score_group(
-    policy: "TunablePolicy",
+    policy: TunablePolicy,
     prepared: Any,
     split: str,
     index: int,
@@ -272,7 +274,7 @@ class Evaluator:
         """How many processes this evaluator scores on."""
         return self._workers
 
-    def __enter__(self) -> "Evaluator":
+    def __enter__(self) -> Evaluator:
         """Enter the context; the pool is already up."""
         return self
 
@@ -291,9 +293,7 @@ class Evaluator:
             terminate(self._pool)
             self._pool = None
 
-    def score(
-        self, policy: "TunablePolicy", prepared: Any, fold: Fold
-    ) -> dict[str, Any]:
+    def score(self, policy: TunablePolicy, prepared: Any, fold: Fold) -> dict[str, Any]:
         """Score one candidate over ``fold``: the mean return and its breakdown.
 
         ``loss`` is the negative mean return (optimisers minimise), ``return_std``
@@ -324,7 +324,7 @@ class Evaluator:
 
 
 def score(
-    policy: "TunablePolicy", prepared: Any, fold: Fold, config: TuningConfig
+    policy: TunablePolicy, prepared: Any, fold: Fold, config: TuningConfig
 ) -> dict[str, Any]:
     """Score one candidate over ``fold`` on a pool built for this call alone.
 

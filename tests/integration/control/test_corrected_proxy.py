@@ -20,7 +20,9 @@ from economic_models.proxy import VARXProxy
 @pytest.fixture(scope="module")
 def proxy(growth_runs) -> VARXProxy:
     """A small Kalman-encoded VARX fit on the shared runs."""
-    return VARXProxy(GROWTH_INTERFACE, encoder=KalmanEncoder(latent_dim=3)).fit(growth_runs)
+    return VARXProxy(GROWTH_INTERFACE, encoder=KalmanEncoder(latent_dim=3)).fit(
+        growth_runs
+    )
 
 
 @pytest.fixture(scope="module")
@@ -28,7 +30,11 @@ def drive(proxy, growth_holdout):
     """A warm-start window and the next ten periods of inputs."""
     w = proxy.required_window + 4
     h = growth_holdout
-    return (h.states[:w], h.params[:w], h.actions[:w]), h.params[w : w + 10], h.actions[w : w + 10]
+    return (
+        (h.states[:w], h.params[:w], h.actions[:w]),
+        h.params[w : w + 10],
+        h.actions[w : w + 10],
+    )
 
 
 def test_null_correction_leaves_the_mean_alone(proxy, drive):
@@ -36,7 +42,9 @@ def test_null_correction_leaves_the_mean_alone(proxy, drive):
     window, params, actions = drive
     corrected = CorrectedProxy(proxy)
     np.testing.assert_allclose(
-        corrected.rollout(window, params, actions), proxy.rollout(window, params, actions), rtol=1e-12
+        corrected.rollout(window, params, actions),
+        proxy.rollout(window, params, actions),
+        rtol=1e-12,
     )
 
 

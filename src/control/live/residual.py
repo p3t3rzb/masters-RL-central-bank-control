@@ -48,7 +48,8 @@ makes the ablation of §8.2 a one-line change.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 import numpy as np
 
@@ -118,8 +119,9 @@ class GaussianResidualNoise(ResidualNoise):
     hand the critic economies that cannot happen.
     """
 
-    def __init__(self, n_outputs: int, *, kappa: float = 0.05, floor: float = 1e-12
-                 ) -> None:
+    def __init__(
+        self, n_outputs: int, *, kappa: float = 0.05, floor: float = 1e-12
+    ) -> None:
         """Track ``n_outputs`` dimensions with EWMA rate ``kappa``.
 
         ``kappa`` is deliberately slower than the bias state's: a mean can be
@@ -347,7 +349,9 @@ class ResidualModel(Residual):
         self.noise_ = noise or GaussianResidualNoise(n_outputs)
         # ``ignore or ()`` would truth-test a numpy array; the caller's block
         # of column indices is usually exactly that.
-        self.ignore = tuple(sorted({int(c) for c in (() if ignore is None else ignore)}))
+        self.ignore = tuple(
+            sorted({int(c) for c in (() if ignore is None else ignore)})
+        )
         self.keep_: np.ndarray | None = None  # design columns actually read
         # One shrinkage per *output*, applied when the correction is read rather
         # than when it is fitted (see :func:`fitted_gate`). ``None`` is the
@@ -355,9 +359,7 @@ class ResidualModel(Residual):
         # scalar ``tau`` amounts to.
         self.gate = None if gate is None else np.asarray(gate, dtype=float)
         if self.gate is not None and self.gate.shape != (n_outputs,):
-            raise ValueError(
-                f"gate is {self.gate.shape}, expected ({n_outputs},)"
-            )
+            raise ValueError(f"gate is {self.gate.shape}, expected ({n_outputs},)")
 
         self.mean_: np.ndarray | None = None  # design standardisation, frozen
         self.std_: np.ndarray | None = None
@@ -592,9 +594,7 @@ def fitted_gate(
             f"{n} seed rows leave {n - start} to score a gate on; need at least 2"
         )
     weight = kwargs.pop("weight", 1.0)
-    model = ResidualModel(n_outputs, **kwargs).seed(
-        X[:start], E[:start], weight=weight
-    )
+    model = ResidualModel(n_outputs, **kwargs).seed(X[:start], E[:start], weight=weight)
     num = np.zeros(n_outputs)
     den = np.zeros(n_outputs)
     for x, eps in zip(X[start:], E[start:]):
@@ -672,8 +672,10 @@ def cross_fitted_residuals(
         blocks.append((X[keep], E[keep]))
         if verbose:
             rmse = float(np.sqrt(np.mean(E[keep] ** 2)))
-            print(f"  fold {j + 1}/{folds}: fit on [0, {lo}), scored [{lo}, {hi}) "
-                  f"-- {hi - lo} rows, RMSE {rmse:.4g}")
+            print(
+                f"  fold {j + 1}/{folds}: fit on [0, {lo}), scored [{lo}, {hi}) "
+                f"-- {hi - lo} rows, RMSE {rmse:.4g}"
+            )
     if not blocks:
         raise ValueError(f"a {T}-step history leaves no held-out rows at {folds} folds")
     return np.vstack([b[0] for b in blocks]), np.vstack([b[1] for b in blocks])

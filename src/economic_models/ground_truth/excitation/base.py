@@ -28,23 +28,29 @@ from __future__ import annotations
 
 import copy
 from abc import ABC, abstractmethod
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, ClassVar, Mapping, Sequence
+from typing import Any, ClassVar
 
 import numpy as np
 from pysolve.model import CalculationError, SolutionNotFoundError
 
+from economic_models.base import ModelStepFailure
 from economic_models.ground_truth.base import PysolveEconomicModel
 from economic_models.ground_truth.excitation.specs import (
     AR1Spec,
-    ExcitationJitter,
     ClimateSpec,
     CrisisSpec,
+    ExcitationJitter,
     StochasticVolatilitySpec,
 )
-from economic_models.base import ModelStepFailure
+from economic_models.ground_truth.linear_re import LinearREEconomicModel
 from economic_models.run import Run, Scenario
 from economic_models.variables import Actions, Parameters, State
+
+#: The structural models a generator can drive: both offer ``set_values``,
+#: ``step``, ``run`` and the ``solutions`` record the driver reads.
+DrivenModel = PysolveEconomicModel | LinearREEconomicModel
 
 
 @dataclass(frozen=True)
@@ -76,7 +82,7 @@ class ExcitationConfig:
 
     def perturbed(
         self, rng: np.random.Generator, jitter: ExcitationJitter
-    ) -> "ExcitationConfig":
+    ) -> ExcitationConfig:
         """A neighbouring economy: the same variables, drifting differently.
 
         Every spec is redrawn around itself (see :class:`ExcitationJitter`), so
@@ -97,15 +103,19 @@ class ExcitationConfig:
             visible={n: s.perturbed(rng, jitter) for n, s in self.visible.items()},
             hidden={n: s.perturbed(rng, jitter) for n, s in self.hidden.items()},
             volatility=(
-                None if self.volatility is None else self.volatility.perturbed(rng, jitter)
+                None
+                if self.volatility is None
+                else self.volatility.perturbed(rng, jitter)
             ),
             crisis=None if self.crisis is None else self.crisis.perturbed(rng, jitter),
-            climate=None if self.climate is None else self.climate.perturbed(rng, jitter),
+            climate=None
+            if self.climate is None
+            else self.climate.perturbed(rng, jitter),
         )._perturb_model_specs(rng, jitter)
 
     def _perturb_model_specs(
         self, rng: np.random.Generator, jitter: ExcitationJitter
-    ) -> "ExcitationConfig":
+    ) -> ExcitationConfig:
         """Perturb a subclass's own specs on top of :meth:`perturbed` (default: none).
 
         The generic half has already been done and handed over as ``self``; a
@@ -203,9 +213,7 @@ class ExcitationProcess(ABC):
         self._since_crisis = min(self._since_crisis, self._min_gap_steps)
         self._reconfigure_model_state()
 
-    def _carried_deviation(
-        self, name: str, old: AR1Spec | None, new: AR1Spec
-    ) -> float:
+    def _carried_deviation(self, name: str, old: AR1Spec | None, new: AR1Spec) -> float:
         """One input's deviation, re-expressed against the new spec's own centre.
 
         A spec's deviation is measured from the level it reverts to, so when a
@@ -301,30 +309,9 @@ class ExcitationProcess(ABC):
         crisis = self._config.crisis
         if crisis is None:
             return
-        # Fade every live episode by its own decay; drop the spent ones.
-        faded = []
-        for dev, decay in self._crisis_episodes:
-            dev = {name: value * decay for name, value in dev.items()}
-            if sum(abs(v) for v in dev.values()) > 1e-6:
-                faded.append((dev, decay))
-        self._crisis_episodes = faded
-
+        self._fade_crisis_episodes()
         self._since_crisis += 1
-        # ``prob`` is the annual onset probability; the per-step hazard that yields
-        # the same annual rate is ``1 - (1-prob)**dt``.
-        onset_prob = (1.0 - (1.0 - crisis.prob) ** self._dt) * self._crisis_scale
-        if self._since_crisis >= self._min_gap_steps and self._rng.random() < onset_prob:
-            severity = self._rng.uniform(*crisis.severity_range)
-            # ``decay_range`` is the annual decay; the per-step decay is its ``dt`` power.
-            decay = self._rng.uniform(*crisis.decay_range) ** self._dt
-            dev = {name: mag * severity for name, mag in crisis.impulses.items()}
-            # A minority of crises are also financial: an extra impulse bundle on
-            # top of the base one, drawn independently at onset.
-            if crisis.financial_impulses and self._rng.random() < crisis.financial_prob:
-                for name, mag in crisis.financial_impulses.items():
-                    dev[name] = dev.get(name, 0.0) + mag * severity
-            self._crisis_episodes.append((dev, decay))
-            self._since_crisis = 0
+        self._maybe_erupt_crisis(crisis)
 
         total: dict[str, float] = {}
         for dev, _ in self._crisis_episodes:
@@ -332,6 +319,34 @@ class ExcitationProcess(ABC):
                 total[name] = total.get(name, 0.0) + value
         self._crisis_total = total
         self.crisis_intensity = sum(abs(v) for v in total.values())
+
+    def _fade_crisis_episodes(self) -> None:
+        """Fade every live episode by its own decay; drop the spent ones."""
+        faded = []
+        for dev, decay in self._crisis_episodes:
+            dev = {name: value * decay for name, value in dev.items()}
+            if sum(abs(v) for v in dev.values()) > 1e-6:
+                faded.append((dev, decay))
+        self._crisis_episodes = faded
+
+    def _maybe_erupt_crisis(self, crisis: CrisisSpec) -> None:
+        """Draw whether a fresh ``crisis`` episode erupts this step, and start it."""
+        # ``prob`` is the annual onset probability; the per-step hazard that yields
+        # the same annual rate is ``1 - (1-prob)**dt``.
+        onset_prob = (1.0 - (1.0 - crisis.prob) ** self._dt) * self._crisis_scale
+        if self._since_crisis < self._min_gap_steps or self._rng.random() >= onset_prob:
+            return
+        severity = self._rng.uniform(*crisis.severity_range)
+        # ``decay_range`` is the annual decay; the per-step decay is its ``dt`` power.
+        decay = self._rng.uniform(*crisis.decay_range) ** self._dt
+        dev = {name: mag * severity for name, mag in crisis.impulses.items()}
+        # A minority of crises are also financial: an extra impulse bundle on
+        # top of the base one, drawn independently at onset.
+        if crisis.financial_impulses and self._rng.random() < crisis.financial_prob:
+            for name, mag in crisis.financial_impulses.items():
+                dev[name] = dev.get(name, 0.0) + mag * severity
+        self._crisis_episodes.append((dev, decay))
+        self._since_crisis = 0
 
     def step(self, feedback: Any) -> dict[str, float]:
         """Draw this step's exogenous input levels given the model ``feedback``.
@@ -380,8 +395,30 @@ class BranchCapture:
 
     index: int  #: row of the run this forks from
     state: dict[str, float]  #: full internal model state at that row
-    process: "ExcitationProcess | None"  #: the excitation, as it stood there
+    process: ExcitationProcess | None  #: the excitation, as it stood there
     applied: dict[str, float]  #: last converged inputs at that row
+
+
+@dataclass
+class _RunRows:
+    """The per-step rows a run accumulates while it is being driven."""
+
+    states: list[list[float]] = field(default_factory=list)
+    params: list[list[float]] = field(default_factory=list)
+    actions: list[list[float]] = field(default_factory=list)
+    hidden: list[list[float]] = field(default_factory=list)
+    volatility: list[float] = field(default_factory=list)
+    crisis_intensity: list[float] = field(default_factory=list)
+
+
+def _cols(rows: list, width: int) -> np.ndarray:
+    """Stack ``rows`` into a ``(len(rows), width)`` float array.
+
+    Keeps the 2-D column shape even for an empty history (a run that
+    collapsed on its first step under ``on_collapse="truncate"``), so
+    ``run.states[:, i]`` and the transform see ``(0, n_col)``, not ``(0,)``.
+    """
+    return np.asarray(rows, dtype=float).reshape(len(rows), width)
 
 
 class ExcitedRunGenerator(ABC):
@@ -449,7 +486,7 @@ class ExcitedRunGenerator(ABC):
         """The baseline value of every model parameter drift is taken around."""
 
     @abstractmethod
-    def _build_model(self) -> PysolveEconomicModel:
+    def _build_model(self) -> DrivenModel:
         """A fresh, fully-seeded model at this generator's ``dt`` and solver knobs.
 
         Not yet settled -- :meth:`_settled_model` runs the burn-in on top.
@@ -462,7 +499,7 @@ class ExcitedRunGenerator(ABC):
         """Build this model's :class:`ExcitationProcess` for one run."""
 
     @abstractmethod
-    def _feedback(self, model: PysolveEconomicModel) -> Any:
+    def _feedback(self, model: DrivenModel) -> Any:
         """The model-specific feedback signal read off the last solved state.
 
         Passed to :meth:`ExcitationProcess.step` for the model's stabilizer (for
@@ -507,7 +544,7 @@ class ExcitedRunGenerator(ABC):
         n_continuations: int,
         *,
         seed: int | None = None,
-        continuation_seeds: list[int | None] | None = None,
+        continuation_seeds: Sequence[int | None] | None = None,
         continuation_configs: Sequence[ExcitationConfig | None] | None = None,
         excite: bool = True,
     ) -> tuple[Run, list[Scenario], dict[str, float]]:
@@ -564,7 +601,7 @@ class ExcitedRunGenerator(ABC):
         *,
         branch_at: Sequence[int] | None = None,
         seed: int | None = None,
-        continuation_seeds: list[int | None] | None = None,
+        continuation_seeds: Sequence[int | None] | None = None,
         continuation_configs: Sequence[ExcitationConfig | None] | None = None,
         excite: bool = True,
     ) -> tuple[Run, list[Scenario], dict[int, BranchCapture]]:
@@ -593,29 +630,9 @@ class ExcitedRunGenerator(ABC):
         """
         if branch_at is None:
             branch_at = [main_steps - 1] * n_continuations
-        elif len(branch_at) != n_continuations:
-            raise ValueError(
-                "branch_at must have n_continuations entries "
-                f"({len(branch_at)} != {n_continuations})"
-            )
-        if continuation_seeds is not None and len(continuation_seeds) != n_continuations:
-            raise ValueError(
-                "continuation_seeds must have n_continuations entries "
-                f"({len(continuation_seeds)} != {n_continuations})"
-            )
-        if continuation_configs is not None:
-            if len(continuation_configs) != n_continuations:
-                raise ValueError(
-                    "continuation_configs must have n_continuations entries "
-                    f"({len(continuation_configs)} != {n_continuations})"
-                )
-            for cfg in continuation_configs:
-                if cfg is not None and cfg.hidden_names != self.config.hidden_names:
-                    raise ValueError(
-                        "a continuation config must excite the same hidden inputs "
-                        f"as the generator's: {cfg.hidden_names} != "
-                        f"{self.config.hidden_names}"
-                    )
+        self._check_continuation_args(
+            n_continuations, branch_at, continuation_seeds, continuation_configs
+        )
         wanted = sorted(set(branch_at) | {main_steps - 1})
         if wanted[0] < 0 or wanted[-1] > main_steps - 1:
             raise ValueError(
@@ -645,32 +662,90 @@ class ExcitedRunGenerator(ABC):
         scenarios: list[Scenario] = []
         for j in range(n_continuations):
             cont_seed = None if continuation_seeds is None else continuation_seeds[j]
-            cont_process = self._fork_process(captures[branch_at[j]].process, cont_seed)
             cont_config = (
                 None if continuation_configs is None else continuation_configs[j]
             )
-            cont_climate = climate
-            if cont_process is not None and cont_config is not None:
-                # A continuation only reaches here when it is a different economy
-                # (a different preset, a perturbation, or both), so its
-                # turbulence is redrawn under its *own* climate spec rather than
-                # inherited: a bank whose members all share the history's weather
-                # is a bank of one character. Drawn off a stream derived from --
-                # but not equal to -- the continuation's own seed, so it stays
-                # reproducible without shifting the shock stream that follows it.
-                if cont_config.climate is not None:
-                    cont_climate = cont_config.climate.draw(
-                        np.random.default_rng(
-                            None if cont_seed is None else cont_seed + 500_000_000
-                        )
-                    )
-                cont_process.reconfigure(cont_config, climate=cont_climate)
             scenarios.append(
-                self._drive_scenario(
-                    cont_process, continuation_steps, cont_climate, cont_seed
+                self._continuation(
+                    captures[branch_at[j]].process,
+                    cont_seed,
+                    cont_config,
+                    climate,
+                    continuation_steps,
                 )
             )
         return main_run, scenarios, captures
+
+    def _check_continuation_args(
+        self,
+        n_continuations: int,
+        branch_at: Sequence[int],
+        continuation_seeds: Sequence[int | None] | None,
+        continuation_configs: Sequence[ExcitationConfig | None] | None,
+    ) -> None:
+        """Check every per-continuation argument has ``n_continuations`` entries.
+
+        Also checks each continuation config records the generator's own hidden
+        inputs, since a :class:`Scenario`'s hidden block is laid out by them.
+        """
+        if len(branch_at) != n_continuations:
+            raise ValueError(
+                "branch_at must have n_continuations entries "
+                f"({len(branch_at)} != {n_continuations})"
+            )
+        if (
+            continuation_seeds is not None
+            and len(continuation_seeds) != n_continuations
+        ):
+            raise ValueError(
+                "continuation_seeds must have n_continuations entries "
+                f"({len(continuation_seeds)} != {n_continuations})"
+            )
+        if continuation_configs is None:
+            return
+        if len(continuation_configs) != n_continuations:
+            raise ValueError(
+                "continuation_configs must have n_continuations entries "
+                f"({len(continuation_configs)} != {n_continuations})"
+            )
+        for cfg in continuation_configs:
+            if cfg is not None and cfg.hidden_names != self.config.hidden_names:
+                raise ValueError(
+                    "a continuation config must excite the same hidden inputs "
+                    f"as the generator's: {cfg.hidden_names} != "
+                    f"{self.config.hidden_names}"
+                )
+
+    def _continuation(
+        self,
+        process: ExcitationProcess | None,
+        seed: int | None,
+        config: ExcitationConfig | None,
+        climate: float | None,
+        n_steps: int,
+    ) -> Scenario:
+        """Fork ``process`` under ``seed`` and draw an ``n_steps`` future from it.
+
+        ``process`` is the excitation as captured at the branch row and
+        ``climate`` the history's turbulence draw; a non-``None`` ``config`` is a
+        structural break at the branch (:meth:`ExcitationProcess.reconfigure`).
+        """
+        cont_process = self._fork_process(process, seed)
+        cont_climate = climate
+        if cont_process is not None and config is not None:
+            # A continuation only reaches here when it is a different economy
+            # (a different preset, a perturbation, or both), so its
+            # turbulence is redrawn under its *own* climate spec rather than
+            # inherited: a bank whose members all share the history's weather
+            # is a bank of one character. Drawn off a stream derived from --
+            # but not equal to -- the continuation's own seed, so it stays
+            # reproducible without shifting the shock stream that follows it.
+            if config.climate is not None:
+                cont_climate = config.climate.draw(
+                    np.random.default_rng(None if seed is None else seed + 500_000_000)
+                )
+            cont_process.reconfigure(config, climate=cont_climate)
+        return self._drive_scenario(cont_process, n_steps, cont_climate, seed)
 
     # -- internals ---------------------------------------------------------
 
@@ -719,7 +794,7 @@ class ExcitedRunGenerator(ABC):
         forked._rng = np.random.default_rng(seed)
         return forked
 
-    def _capture_state(self, model: PysolveEconomicModel) -> dict[str, float]:
+    def _capture_state(self, model: DrivenModel) -> dict[str, float]:
         """The full end-of-run internal model state, as a plain name->value dict.
 
         Drops pysolve's private lag parameters (``_x__1``); the remaining visible
@@ -765,10 +840,6 @@ class ExcitedRunGenerator(ABC):
             hidden.append([values[name] for name in hidden_names])
 
         excited = process is not None
-
-        def _cols(rows: list, width: int) -> np.ndarray:
-            return np.asarray(rows, dtype=float).reshape(len(rows), width)
-
         return Scenario(
             params=_cols(params, len(params_names)),
             hidden=_cols(hidden, len(hidden_names)),
@@ -783,7 +854,7 @@ class ExcitedRunGenerator(ABC):
 
     def _drive(
         self,
-        model: PysolveEconomicModel,
+        model: DrivenModel,
         process: ExcitationProcess | None,
         applied: dict[str, float],
         n_steps: int,
@@ -807,13 +878,7 @@ class ExcitedRunGenerator(ABC):
         """
         wanted = frozenset(branch_at)
         captures: dict[int, BranchCapture] = {}
-        state_names = self.STATE.names()
-        param_names = self.PARAMETERS.names()
-        action_names = self.ACTIONS.names()
-        hidden_names = self.config.hidden_names
-
-        states, params, actions, hidden = [], [], [], []
-        volatility, crisis_intensity = [], []
+        rows = _RunRows()
         dampened = 0
         collapsed = False
         for _ in range(n_steps):
@@ -823,7 +888,7 @@ class ExcitedRunGenerator(ABC):
                 target = dict(applied)
             try:
                 target, attempts = self._solve_step(
-                    model, target, applied, len(states), seed
+                    model, target, applied, len(rows.states), seed
                 )
             except RuntimeError:
                 if self.on_collapse == "raise":
@@ -833,48 +898,51 @@ class ExcitedRunGenerator(ABC):
             dampened += attempts > 0
             applied = target
 
-            solution = model.solutions[-1]
-            states.append([solution[name] for name in state_names])
-            params.append([target[name] for name in param_names])
-            actions.append([target[name] for name in action_names])
-            hidden.append([target[name] for name in hidden_names])
-            if process is not None:
-                volatility.append(process.vol_multiplier)
-                crisis_intensity.append(process.crisis_intensity)
-            if len(states) - 1 in wanted:
-                captures[len(states) - 1] = BranchCapture(
-                    index=len(states) - 1,
+            self._record_row(rows, model, target, process)
+            if len(rows.states) - 1 in wanted:
+                captures[len(rows.states) - 1] = BranchCapture(
+                    index=len(rows.states) - 1,
                     state=self._capture_state(model),
                     process=None if process is None else copy.deepcopy(process),
                     applied=dict(applied),
                 )
 
         excited = process is not None
-
-        # Keep the 2-D column shape even for an empty history (a run that
-        # collapsed on its first step under ``on_collapse="truncate"``), so
-        # ``run.states[:, i]`` and the transform see ``(0, n_col)``, not ``(0,)``.
-        def _cols(rows: list, width: int) -> np.ndarray:
-            return np.asarray(rows, dtype=float).reshape(len(rows), width)
-
         run = Run(
-            states=_cols(states, len(state_names)),
-            params=_cols(params, len(param_names)),
-            actions=_cols(actions, len(action_names)),
-            hidden=_cols(hidden, len(hidden_names)),
+            states=_cols(rows.states, len(self.STATE.names())),
+            params=_cols(rows.params, len(self.PARAMETERS.names())),
+            actions=_cols(rows.actions, len(self.ACTIONS.names())),
+            hidden=_cols(rows.hidden, len(self.config.hidden_names)),
             dt=self.dt,
             seed=seed,
             dampened_steps=dampened,
-            volatility=np.asarray(volatility, dtype=float) if excited else None,
+            volatility=np.asarray(rows.volatility, dtype=float) if excited else None,
             crisis_intensity=(
-                np.asarray(crisis_intensity, dtype=float) if excited else None
+                np.asarray(rows.crisis_intensity, dtype=float) if excited else None
             ),
             climate=climate,
             collapsed=collapsed,
         )
         return run, applied, captures
 
-    def _settled_model(self) -> PysolveEconomicModel:
+    def _record_row(
+        self,
+        rows: _RunRows,
+        model: DrivenModel,
+        target: dict[str, float],
+        process: ExcitationProcess | None,
+    ) -> None:
+        """Append the row the model just solved, under inputs ``target``, to ``rows``."""
+        solution = model.solutions[-1]
+        rows.states.append([solution[name] for name in self.STATE.names()])
+        rows.params.append([target[name] for name in self.PARAMETERS.names()])
+        rows.actions.append([target[name] for name in self.ACTIONS.names()])
+        rows.hidden.append([target[name] for name in self.config.hidden_names])
+        if process is not None:
+            rows.volatility.append(process.vol_multiplier)
+            rows.crisis_intensity.append(process.crisis_intensity)
+
+    def _settled_model(self) -> DrivenModel:
         """A model seeded with the calibration and settled onto its path.
 
         ``burn_in`` is a number of *years*; at a sub-annual ``dt`` it is run for the
@@ -886,7 +954,7 @@ class ExcitedRunGenerator(ABC):
 
     def _solve_step(
         self,
-        model: PysolveEconomicModel,
+        model: DrivenModel,
         target: dict[str, float],
         applied: dict[str, float],
         step_index: int,

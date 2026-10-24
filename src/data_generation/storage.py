@@ -59,14 +59,16 @@ def save_run(path: str | Path, run: Run) -> None:
     if run.crisis_intensity is not None:
         arrays["crisis_intensity"] = run.crisis_intensity
 
-    arrays["_meta"] = _pack_meta({
-        "dt": float(run.dt),
-        "seed": _NO_SEED if run.seed is None else int(run.seed),
-        "dampened_steps": int(run.dampened_steps),
-        "climate": np.nan if run.climate is None else float(run.climate),
-        "collapsed": bool(run.collapsed),
-    })
-    np.savez_compressed(path, **arrays)
+    arrays["_meta"] = _pack_meta(
+        {
+            "dt": float(run.dt),
+            "seed": _NO_SEED if run.seed is None else int(run.seed),
+            "dampened_steps": int(run.dampened_steps),
+            "climate": np.nan if run.climate is None else float(run.climate),
+            "collapsed": bool(run.collapsed),
+        }
+    )
+    np.savez_compressed(path, allow_pickle=False, **arrays)
 
 
 def load_run(path: str | Path) -> Run:
@@ -108,12 +110,14 @@ def save_scenario(path: str | Path, scenario: Scenario) -> None:
     if scenario.crisis_intensity is not None:
         arrays["crisis_intensity"] = scenario.crisis_intensity
 
-    arrays["_meta"] = _pack_meta({
-        "dt": float(scenario.dt),
-        "seed": _NO_SEED if scenario.seed is None else int(scenario.seed),
-        "climate": np.nan if scenario.climate is None else float(scenario.climate),
-    })
-    np.savez_compressed(path, **arrays)
+    arrays["_meta"] = _pack_meta(
+        {
+            "dt": float(scenario.dt),
+            "seed": _NO_SEED if scenario.seed is None else int(scenario.seed),
+            "climate": np.nan if scenario.climate is None else float(scenario.climate),
+        }
+    )
+    np.savez_compressed(path, allow_pickle=False, **arrays)
 
 
 def load_scenario(path: str | Path) -> Scenario:

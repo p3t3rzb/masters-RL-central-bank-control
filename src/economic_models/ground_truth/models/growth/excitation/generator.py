@@ -21,13 +21,15 @@ from typing import Any
 
 import numpy as np
 
-from economic_models.ground_truth.base import PysolveEconomicModel
 from economic_models.ground_truth.excitation.base import (
+    DrivenModel,
     ExcitationProcess,
     ExcitedRunGenerator,
 )
 from economic_models.ground_truth.models.growth.calibration import GrowthCalibration
-from economic_models.ground_truth.models.growth.excitation.presets import GrowthExcitationConfig
+from economic_models.ground_truth.models.growth.excitation.presets import (
+    GrowthExcitationConfig,
+)
 from economic_models.ground_truth.models.growth.model import GrowthModel
 from economic_models.ground_truth.models.growth.variables import (
     GrowthActions,
@@ -44,6 +46,8 @@ class GrowthExcitationProcess(ExcitationProcess):
     ``Nfe``. The ``feedback`` passed to :meth:`step` is the previous step's
     employment rate ``ER``, which drives the countercyclical fiscal stabilizer.
     """
+
+    _config: GrowthExcitationConfig
 
     def _init_model_state(self) -> None:
         """Seed the GRg-gap and Nfe log-deviation draw state for this run."""
@@ -151,7 +155,7 @@ class GrowthRunGenerator(ExcitedRunGenerator):
             self.config, self._baselines, rng, climate=climate, dt=self.dt
         )
 
-    def _feedback(self, model: PysolveEconomicModel) -> float:
+    def _feedback(self, model: DrivenModel) -> float:
         """The previous step's employment rate ``ER`` (drives the fiscal stabilizer)."""
         return float(model.solutions[-1]["ER"])
 

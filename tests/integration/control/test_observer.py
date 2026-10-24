@@ -28,7 +28,9 @@ def observer(growth_runs) -> Observer:
 
 def _blocks(run, t):
     """The trailing two level rows ending at ``t``, as the environment keeps them."""
-    return run.states[t - 1 : t + 1], np.hstack([run.params, run.actions])[t - 1 : t + 1]
+    return run.states[t - 1 : t + 1], np.hstack([run.params, run.actions])[
+        t - 1 : t + 1
+    ]
 
 
 def test_latent_block_comes_last(observer):
@@ -61,7 +63,9 @@ def test_observation_matches_the_batch_features(observer, growth_runs):
     row = 45
     obs, _ = observer.observe(*_blocks(run, row), observer.belief_at(row))
     raw = observer.run_features(run)[row - 1]
-    expected = np.clip((raw - observer.mean_) / observer.std_, -observer.clip, observer.clip)
+    expected = np.clip(
+        (raw - observer.mean_) / observer.std_, -observer.clip, observer.clip
+    )
     np.testing.assert_allclose(obs, expected, atol=1e-6)
     np.testing.assert_allclose(observer.unstandardise(obs), raw, atol=1e-6)
 
@@ -74,7 +78,9 @@ def test_observe_is_pure(observer, growth_runs):
     first, _ = observer.observe(*_blocks(run, 30), belief)
     again, _ = observer.observe(*_blocks(run, 30), belief)
     np.testing.assert_array_equal(first, again)
-    np.testing.assert_array_equal(observer.encoder.latent(belief), observer.encoder.latent(held))
+    np.testing.assert_array_equal(
+        observer.encoder.latent(belief), observer.encoder.latent(held)
+    )
 
 
 def test_unfitted_observer_cannot_standardise(growth_runs):

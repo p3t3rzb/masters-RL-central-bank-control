@@ -28,8 +28,8 @@ do not describe an economy.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Mapping
 
 import numpy as np
 
@@ -166,7 +166,9 @@ class SwCalibration:
 
     params: SwParams  #: the deep parameters
     shock_sigma: Mapping[str, float]  #: standard error of each innovation
-    exogenous_baselines: Mapping[str, float]  #: baselines of the visible exogenous inputs
+    exogenous_baselines: Mapping[
+        str, float
+    ]  #: baselines of the visible exogenous inputs
     initial_levels: Mapping[str, float]  #: where the reconstructed observables start
     drift: tuple[str, ...] = field(default=())  #: deep parameters the excitation moves
 
@@ -185,7 +187,7 @@ class SwCalibration:
         return {**deep, **{k: float(v) for k, v in self.exogenous_baselines.items()}}
 
     @classmethod
-    def baseline(cls) -> "SwCalibration":
+    def baseline(cls) -> SwCalibration:
         """The estimated economy: Smets and Wouters' posterior mode."""
         params = SwParams(**_MODE)
         return cls(
@@ -197,7 +199,9 @@ class SwCalibration:
         )
 
     @classmethod
-    def sample(cls, rng: np.random.Generator, *, strength: float = 1.0) -> "SwCalibration":
+    def sample(
+        cls, rng: np.random.Generator, *, strength: float = 1.0
+    ) -> SwCalibration:
         """Draw one economy from the estimated posterior.
 
         Each parameter with a reported interval is drawn independently from the
@@ -227,6 +231,7 @@ class SwCalibration:
 
 # -- the visible side ------------------------------------------------------
 
+
 def _baselines(params: SwParams) -> dict[str, float]:
     """Baselines of the visible exogenous inputs, at the drawn parameters.
 
@@ -249,6 +254,7 @@ def _baselines(params: SwParams) -> dict[str, float]:
         "PIstar": 4.0 * params.pi_bar / 100.0,
         "QE": 0.0,
     }
+
 
 #: Starting levels of the reconstructed observables. The scale is arbitrary --
 #: everything the model and the mandate care about is a ratio or a growth rate --

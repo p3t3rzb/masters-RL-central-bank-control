@@ -28,8 +28,13 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from economic_models.ground_truth.excitation.base import ExcitationConfig
-from economic_models.ground_truth.registry import DEFAULT_MODEL, ground_truth
+from control.world import (
+    BranchPoint,
+    EpisodeBank,
+    FiscalStabilizer,
+    TrainingWorld,
+    WorldConfig,
+)
 from data_generation.storage import (
     branch_path,
     load_branch_state,
@@ -39,14 +44,11 @@ from data_generation.storage import (
     read_manifest,
     scenario_path,
 )
-
-from control.world import (
-    BranchPoint,
-    EpisodeBank,
-    FiscalStabilizer,
-    TrainingWorld,
-    WorldConfig,
+from economic_models.ground_truth.models.growth import GrowthExcitationConfig
+from economic_models.ground_truth.models.smets_wouters.excitation import (
+    SwExcitationConfig,
 )
+from economic_models.ground_truth.registry import DEFAULT_MODEL, ground_truth
 
 #: The dataset splits a group may be read from.
 SPLITS = ("train", "test")
@@ -150,7 +152,9 @@ def _check_split(split: str) -> None:
         raise ValueError(f"split must be one of {SPLITS}, got {split!r}")
 
 
-def _excitation(manifest: dict[str, Any]) -> ExcitationConfig:
+def _excitation(
+    manifest: dict[str, Any],
+) -> GrowthExcitationConfig | SwExcitationConfig:
     """The excitation preset the dataset was generated under.
 
     Two things a group's ``.npz`` files do not carry come from here: the fiscal

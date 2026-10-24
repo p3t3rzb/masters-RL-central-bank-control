@@ -166,14 +166,17 @@ class LSTMEncoder(GenerativeEncoder):
 
     def _sy(self, F: np.ndarray) -> np.ndarray:
         """Column-standardise observation rows ``F``."""
+        assert self._y_scaler is not None
         return self._y_scaler.transform(F)
 
     def _su(self, U: np.ndarray) -> np.ndarray:
         """Column-standardise exog input rows ``U``."""
+        assert self._u_scaler is not None
         return self._u_scaler.transform(U)
 
     def _inv_y(self, Y: np.ndarray) -> np.ndarray:
         """Map standardised observations ``Y`` back to original feature units."""
+        assert self._y_scaler is not None
         return self._y_scaler.inverse_transform(Y)
 
     def _t(self, A: np.ndarray) -> torch.Tensor:
@@ -194,11 +197,7 @@ class LSTMEncoder(GenerativeEncoder):
         dy, ku = Fall.shape[1], Uall.shape[1]
 
         # Only runs with at least one transition contribute training pairs.
-        runs = [
-            (self._sy(F), self._su(U))
-            for F, U in feature_runs
-            if len(F) >= 2
-        ]
+        runs = [(self._sy(F), self._su(U)) for F, U in feature_runs if len(F) >= 2]
         if not runs:
             raise ValueError("LSTMEncoder.fit needs at least one run of length >= 2")
 
@@ -246,9 +245,9 @@ class LSTMEncoder(GenerativeEncoder):
         self.net_.eval()
         with torch.no_grad():
             H, _ = self.net_.encode(Xt)
-            pred = self.net_.read(H[:, :-1, :], Unt).cpu().numpy()
+            fitted = self.net_.read(H[:, :-1, :], Unt).cpu().numpy()
         m3 = mask[:, :, None].astype(bool)
-        resid = (Ytgt - pred)[np.broadcast_to(m3, Ytgt.shape)].reshape(-1, dy)
+        resid = (Ytgt - fitted)[np.broadcast_to(m3, Ytgt.shape)].reshape(-1, dy)
         self._resid_std = resid.std(axis=0)
         self._resid_std[self._resid_std == 0] = 1e-6
         self._fitted = True
@@ -260,6 +259,7 @@ class LSTMEncoder(GenerativeEncoder):
         """Causal hidden-state latent per period for one run, ``(len(F), m)``."""
         self._require_fitted()
         X = np.hstack([self._sy(F), self._su(U)])[None, :, :]
+        assert self.net_ is not None
         self.net_.eval()
         with torch.no_grad():
             H, _ = self.net_.encode(self._t(X))
@@ -271,6 +271,7 @@ class LSTMEncoder(GenerativeEncoder):
         """Warm-start the ``(h, c)`` state by running the LSTM over the window."""
         self._require_fitted()
         X = np.hstack([self._sy(F_win), self._su(U_win)])[None, :, :]
+        assert self.net_ is not None
         self.net_.eval()
         with torch.no_grad():
             _, (h, c) = self.net_.encode(self._t(X))
@@ -281,13 +282,18 @@ class LSTMEncoder(GenerativeEncoder):
         # The top layer's hidden state is the conditioning latent.
         return belief.h[-1].copy()
 
-    def advance(self, belief: _Belief, f_next: np.ndarray, u_next: np.ndarray) -> _Belief:
+    def advance(
+        self, belief: _Belief, f_next: np.ndarray, u_next: np.ndarray
+    ) -> _Belief:
         """Fold one realised ``(f_next, u_next)`` in via one LSTM step."""
-        x = np.hstack([self._sy(f_next[None, :]), self._su(u_next[None, :])])[None, :, :]
+        x = np.hstack([self._sy(f_next[None, :]), self._su(u_next[None, :])])[
+            None, :, :
+        ]
         state = (
             self._t(belief.h)[:, None, :].contiguous(),
             self._t(belief.c)[:, None, :].contiguous(),
         )
+        assert self.net_ is not None
         self.net_.eval()
         with torch.no_grad():
             _, (h, c) = self.net_.encode(self._t(x), state)
@@ -304,6 +310,7 @@ class LSTMEncoder(GenerativeEncoder):
         """One-step head forecast from the belief; a draw if ``rng`` is given."""
         h = self._t(belief.h[-1][None, :])
         u = self._t(self._su(u_next[None, :]))
+        assert self.net_ is not None
         self.net_.eval()
         with torch.no_grad():
             y = self.net_.read(h, u).cpu().numpy()[0]
@@ -320,6 +327,7 @@ class LSTMEncoder(GenerativeEncoder):
         """
         h = self._t(Z)
         u = self._t(self._su(U_next))
+        assert self.net_ is not None
         self.net_.eval()
         with torch.no_grad():
             Ystd = self.net_.read(h, u).cpu().numpy()

@@ -22,13 +22,20 @@ not converge.
 from __future__ import annotations
 
 import math
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 
-from economic_models.ground_truth.excitation.base import ExcitationProcess, ExcitedRunGenerator
+from economic_models.ground_truth.excitation.base import (
+    DrivenModel,
+    ExcitationProcess,
+    ExcitedRunGenerator,
+)
 from economic_models.ground_truth.models.smets_wouters.calibration import SwCalibration
-from economic_models.ground_truth.models.smets_wouters.excitation.presets import SwExcitationConfig
+from economic_models.ground_truth.models.smets_wouters.excitation.presets import (
+    SwExcitationConfig,
+)
 from economic_models.ground_truth.models.smets_wouters.model import SwModel
 from economic_models.ground_truth.models.smets_wouters.variables import (
     SwActions,
@@ -43,6 +50,8 @@ _MAX_DRAWS = 50
 
 class SwExcitationProcess(ExcitationProcess):
     """The exogenous path of one Smets-Wouters run."""
+
+    _config: SwExcitationConfig
 
     def _init_model_state(self) -> None:
         """Start the two level walks and the discretionary spending gap at rest."""
@@ -61,17 +70,23 @@ class SwExcitationProcess(ExcitationProcess):
         ``feedback`` is last period's employment rate, which is what the fiscal
         response leans against.
         """
-        config: SwExcitationConfig = self._config
+        config = self._config
         employment = 0.95 if feedback is None else float(feedback)
 
         self._spending_gap, _ = self._gap_spec.advance(
-            self._spending_gap, 0.0, self._rng, sigma_scale=self.vol_multiplier, dt=self._dt
+            self._spending_gap,
+            0.0,
+            self._rng,
+            sigma_scale=self.vol_multiplier,
+            dt=self._dt,
         )
         # Spending leans against the employment shortfall, through the same method
         # the rollout-time stabiliser in :mod:`control.world` calls, so the two can
         # never drift apart.
         support = config.gov_spending.support(employment)
-        values["EXg"] = float(np.clip(self._spending_gap + support, *config.gov_spending.bounds))
+        values["EXg"] = float(
+            np.clip(self._spending_gap + support, *config.gov_spending.bounds)
+        )
 
         self._log_labour = config.labour_force.advance(
             self._log_labour, self._rng, sigma_scale=self.vol_multiplier, dt=self._dt
@@ -81,7 +96,9 @@ class SwExcitationProcess(ExcitationProcess):
         self._log_energy = config.energy.advance(
             self._log_energy, self._rng, sigma_scale=self.vol_multiplier, dt=self._dt
         )
-        values["Penergy"] = float(self._baselines["Penergy"]) * math.exp(self._log_energy)
+        values["Penergy"] = float(self._baselines["Penergy"]) * math.exp(
+            self._log_energy
+        )
 
 
 class SwRunGenerator(ExcitedRunGenerator):
@@ -99,7 +116,7 @@ class SwRunGenerator(ExcitedRunGenerator):
         sample_economy: float = 0.0,
         seed: int | None = None,
         dt: float = 0.25,
-        burn_in: float = 15.0,
+        burn_in: int = 15,
         **kwargs: Any,
     ) -> None:
         """Set up the generator.
@@ -116,7 +133,9 @@ class SwRunGenerator(ExcitedRunGenerator):
             if calibration is not None
             else self._draw_calibration(np.random.default_rng(seed))
         )
-        super().__init__(config or SwExcitationConfig.default(), dt=dt, burn_in=burn_in, **kwargs)
+        super().__init__(
+            config or SwExcitationConfig.default(), dt=dt, burn_in=burn_in, **kwargs
+        )
 
     # -- the subclass contract ---------------------------------------------
 
@@ -138,7 +157,7 @@ class SwRunGenerator(ExcitedRunGenerator):
             self.config, self._baselines, rng, climate=climate, dt=self.dt
         )
 
-    def _feedback(self, model: SwModel) -> Any:
+    def _feedback(self, model: DrivenModel) -> Any:
         """The employment rate the fiscal response leans against."""
         return float(model.solutions[-1]["ER"])
 

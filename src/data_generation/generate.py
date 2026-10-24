@@ -40,13 +40,11 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
+from data_generation import storage
+from data_generation.config import DatasetConfig
 from economic_models.ground_truth.excitation.base import ExcitedRunGenerator
 from economic_models.ground_truth.registry import ground_truth
 from parallel import managed_pool
-
-from data_generation import storage
-from data_generation.config import DatasetConfig
-
 
 #: Attempts a group may burn under ``on_collapse="resample"`` before giving up.
 #: Collapses are a small-probability event per run, so exhausting this many
@@ -93,7 +91,9 @@ def _build_generator(config: DatasetConfig) -> ExcitedRunGenerator:
         burn_in=config.burn_in,
         # Under "resample" the retry loop in generate_group needs the collapse
         # surfaced as a truncated run's flag, not an exception.
-        on_collapse="truncate" if config.on_collapse == "resample" else config.on_collapse,
+        on_collapse="truncate"
+        if config.on_collapse == "resample"
+        else config.on_collapse,
     )
 
 
@@ -213,7 +213,11 @@ def generate_dataset(config: DatasetConfig, *, verbose: bool = True) -> dict:
     and a per-group summary, so the dataset is self-describing on disk.
     """
     interface = ground_truth(config.model).interface
-    State, Parameters, Actions = interface.state, interface.parameters, interface.actions
+    State, Parameters, Actions = (
+        interface.state,
+        interface.parameters,
+        interface.actions,
+    )
 
     tasks = plan_tasks(config)
     workers = min(config.resolved_workers(), len(tasks))
@@ -227,25 +231,7 @@ def generate_dataset(config: DatasetConfig, *, verbose: bool = True) -> dict:
         )
 
     start = time.perf_counter()
-    results: list[_GroupResult] = []
-    if workers <= 1:
-        _worker_init(config)
-        for task in tasks:
-            results.append(_worker_generate(task))
-            if verbose:
-                _report(results[-1], len(results), len(tasks))
-    else:
-        # Spawned workers rebuild their own generator in _worker_init; the pool
-        # tears itself down on an interrupt rather than working through the
-        # thousand groups still queued behind it.
-        with managed_pool(workers, initializer=_worker_init, initargs=(config,)) as pool:
-            futures = {pool.submit(_worker_generate, task): task for task in tasks}
-            for future in as_completed(futures):
-                result = future.result()
-                results.append(result)
-                if verbose:
-                    _report(result, len(results), len(tasks))
-
+    results = _run_groups(config, tasks, workers, verbose=verbose)
     elapsed = time.perf_counter() - start
     manifest = _build_manifest(config, results, elapsed, State, Parameters, Actions)
     storage.write_manifest(config.output_dir, manifest)
@@ -258,6 +244,37 @@ def generate_dataset(config: DatasetConfig, *, verbose: bool = True) -> dict:
             f"{resamples} collapsed attempt(s) resampled)."
         )
     return manifest
+
+
+def _run_groups(
+    config: DatasetConfig, tasks: list[_GroupTask], workers: int, *, verbose: bool
+) -> list[_GroupResult]:
+    """Generate every group in ``tasks``, inline or across ``workers`` processes.
+
+    Results come back in completion order; ``verbose`` prints a progress line as
+    each group finishes.
+    """
+    results: list[_GroupResult] = []
+    if workers <= 1:
+        _worker_init(config)
+        for task in tasks:
+            results.append(_worker_generate(task))
+            if verbose:
+                _report(results[-1], len(results), len(tasks))
+    else:
+        # Spawned workers rebuild their own generator in _worker_init; the pool
+        # tears itself down on an interrupt rather than working through the
+        # thousand groups still queued behind it.
+        with managed_pool(
+            workers, initializer=_worker_init, initargs=(config,)
+        ) as pool:
+            futures = {pool.submit(_worker_generate, task): task for task in tasks}
+            for future in as_completed(futures):
+                result = future.result()
+                results.append(result)
+                if verbose:
+                    _report(result, len(results), len(tasks))
+    return results
 
 
 def _report(result: _GroupResult, done: int, total: int) -> None:
@@ -330,33 +347,78 @@ def _parse_args(argv: list[str] | None = None) -> DatasetConfig:
         description="Generate a GROWTH-model dataset of excited main runs and "
         "their branching continuations, split into train/test data.",
     )
-    ap.add_argument("--n-runs", type=int, default=defaults.n_runs,
-                    help="number of independent main (historic) runs")
-    ap.add_argument("--n-continuations", type=int, default=defaults.n_continuations,
-                    help="continuations branching from the end of each main run")
-    ap.add_argument("--main-length", type=int, default=defaults.main_length,
-                    help="recorded steps in each main run")
-    ap.add_argument("--continuation-length", type=int, default=defaults.continuation_length,
-                    help="recorded steps in each continuation")
-    ap.add_argument("--dt", type=float, default=defaults.dt,
-                    help="step length in years (1 annual, 0.0833 monthly)")
-    ap.add_argument("--excitation", choices=("default", "realistic"),
-                    default=defaults.excitation,
-                    help="'default' calm calibration or 'realistic' with volatility/crises")
-    ap.add_argument("--burn-in", type=int, default=defaults.burn_in,
-                    help="years run unrecorded to settle each main run onto its path")
-    ap.add_argument("--on-collapse", choices=("raise", "truncate", "resample"),
-                    default=defaults.on_collapse,
-                    help="what to do on an unrecoverable solver failure "
-                    "('resample' regenerates the group with fresh seeds)")
-    ap.add_argument("--train-fraction", type=float, default=defaults.train_fraction,
-                    help="fraction of main runs (with their continuations) used for training")
-    ap.add_argument("--base-seed", type=int, default=defaults.base_seed,
-                    help="root seed; all run/continuation seeds derive from it")
-    ap.add_argument("--output-dir", default=defaults.output_dir,
-                    help="directory the dataset is written under (next to src/)")
-    ap.add_argument("--workers", type=int, default=defaults.workers,
-                    help="worker processes (default: CPU count)")
+    ap.add_argument(
+        "--n-runs",
+        type=int,
+        default=defaults.n_runs,
+        help="number of independent main (historic) runs",
+    )
+    ap.add_argument(
+        "--n-continuations",
+        type=int,
+        default=defaults.n_continuations,
+        help="continuations branching from the end of each main run",
+    )
+    ap.add_argument(
+        "--main-length",
+        type=int,
+        default=defaults.main_length,
+        help="recorded steps in each main run",
+    )
+    ap.add_argument(
+        "--continuation-length",
+        type=int,
+        default=defaults.continuation_length,
+        help="recorded steps in each continuation",
+    )
+    ap.add_argument(
+        "--dt",
+        type=float,
+        default=defaults.dt,
+        help="step length in years (1 annual, 0.0833 monthly)",
+    )
+    ap.add_argument(
+        "--excitation",
+        choices=("default", "realistic"),
+        default=defaults.excitation,
+        help="'default' calm calibration or 'realistic' with volatility/crises",
+    )
+    ap.add_argument(
+        "--burn-in",
+        type=int,
+        default=defaults.burn_in,
+        help="years run unrecorded to settle each main run onto its path",
+    )
+    ap.add_argument(
+        "--on-collapse",
+        choices=("raise", "truncate", "resample"),
+        default=defaults.on_collapse,
+        help="what to do on an unrecoverable solver failure "
+        "('resample' regenerates the group with fresh seeds)",
+    )
+    ap.add_argument(
+        "--train-fraction",
+        type=float,
+        default=defaults.train_fraction,
+        help="fraction of main runs (with their continuations) used for training",
+    )
+    ap.add_argument(
+        "--base-seed",
+        type=int,
+        default=defaults.base_seed,
+        help="root seed; all run/continuation seeds derive from it",
+    )
+    ap.add_argument(
+        "--output-dir",
+        default=defaults.output_dir,
+        help="directory the dataset is written under (next to src/)",
+    )
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=defaults.workers,
+        help="worker processes (default: CPU count)",
+    )
     args = ap.parse_args(argv)
     return replace(
         defaults,

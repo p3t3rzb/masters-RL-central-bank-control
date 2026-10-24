@@ -8,7 +8,6 @@ the learned proxies implement it.
 """
 
 from abc import ABC, abstractmethod
-from typing import ClassVar
 
 from economic_models.variables import Actions, Parameters, State
 
@@ -42,9 +41,9 @@ class BaseEconomicModel(ABC):
 
     #: The model's endogenous-state / exogenous-observed / controlled value
     #: spaces. Abstract here (no default); every concrete model must set them.
-    STATE: ClassVar[type[State]]
-    PARAMETERS: ClassVar[type[Parameters]]
-    ACTIONS: ClassVar[type[Actions]]
+    STATE: type[State]
+    PARAMETERS: type[Parameters]
+    ACTIONS: type[Actions]
 
     def _exogenous_names(self) -> set[str]:
         """The names of every exogenous input: ``Parameters`` and ``Actions`` combined."""

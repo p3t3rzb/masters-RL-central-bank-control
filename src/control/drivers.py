@@ -31,17 +31,16 @@ base declines by default and :class:`ProxyDriver` opts in.
 from __future__ import annotations
 
 import inspect
-
 from abc import ABC, abstractmethod
 from typing import Any
 
 import numpy as np
 
-from economic_models.base import BaseEconomicModel
+from control.world import BranchPoint, TrainingWorld
+from economic_models.ground_truth.models.growth import GrowthModel
+from economic_models.ground_truth.models.smets_wouters import SwModel
 from economic_models.proxy import BaseProxyModel, RolloutState
 from economic_models.variables import Actions, Parameters, State
-
-from control.world import BranchPoint, TrainingWorld
 
 
 class ModelDriver(ABC):
@@ -224,13 +223,14 @@ class GroundTruthDriver(ModelDriver):
     pysolve model that must not be copied.
     """
 
-    def __init__(self, world: TrainingWorld, *, iterations: int = 1000,
-                 threshold: float = 1e-6) -> None:
+    def __init__(
+        self, world: TrainingWorld, *, iterations: int = 1000, threshold: float = 1e-6
+    ) -> None:
         """Configure the solver knobs used for every episode of this driver."""
         super().__init__(world)
         self.iterations = iterations
         self.threshold = threshold
-        self.model_: BaseEconomicModel | None = None
+        self.model_: GrowthModel | SwModel | None = None
 
     @property
     def required_window(self) -> int:
@@ -266,7 +266,9 @@ class GroundTruthDriver(ModelDriver):
         return self.model_.advance(parameters, actions)
 
 
-def _build(world: TrainingWorld, iterations: int, threshold: float) -> BaseEconomicModel:
+def _build(
+    world: TrainingWorld, iterations: int, threshold: float
+) -> GrowthModel | SwModel:
     """A fresh ground-truth model for ``world``, at its timestep.
 
     The pysolve models take an iteration cap and a convergence tolerance; a model
@@ -275,7 +277,7 @@ def _build(world: TrainingWorld, iterations: int, threshold: float) -> BaseEcono
     """
     model = world.config.spec.model
     accepted = inspect.signature(model.__init__).parameters
-    knobs = {
+    knobs: dict[str, Any] = {
         name: value
         for name, value in (("iterations", iterations), ("threshold", threshold))
         if name in accepted

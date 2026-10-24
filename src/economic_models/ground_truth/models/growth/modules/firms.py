@@ -13,7 +13,10 @@ from economic_models.ground_truth.models.growth.modules.conventions import (
     PRICE_YEAR_AGO,
     REAL_YEAR_AGO,
 )
-from economic_models.ground_truth.models.growth.variables import GrowthParameters, GrowthState
+from economic_models.ground_truth.models.growth.variables import (
+    GrowthParameters,
+    GrowthState,
+)
 
 _DESC = {**GrowthState.describe(), **GrowthParameters.describe()}
 

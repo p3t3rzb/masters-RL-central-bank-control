@@ -35,9 +35,9 @@ Run a rehearsal from the command line with
 from control.live.buffer import BranchPoint, RealBuffer, seed_from_run
 from control.live.corrected import CorrectedProxy, CorrectedRolloutState
 from control.live.deploy import (
-    TAYLOR_GAINS,
     FORCINGS,
     ONLINE_POLICIES,
+    TAYLOR_GAINS,
     LiveConfig,
     RehearsalResult,
     RunRecord,

@@ -40,7 +40,7 @@ no changes to carry a second ground-truth model.
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 
@@ -140,6 +140,15 @@ class LinearREEconomicModel(BaseEconomicModel):
         """
         return None
 
+    @property
+    def _bound_variable(self) -> int:
+        """Index in the state vector of the variable :meth:`_bound` constrains.
+
+        Only read while the bound is enabled, so a model that leaves :meth:`_bound`
+        at ``None`` need not supply it.
+        """
+        raise NotImplementedError
+
     # -- the solution ------------------------------------------------------
 
     @property
@@ -147,10 +156,8 @@ class LinearREEconomicModel(BaseEconomicModel):
         """The current reduced form, recomputed only when the parameters have moved."""
         signature = self._parameter_signature()
         if self._solution is None or signature != self._solved_at:
-            matrices = self._matrices()
-            self._solution = solve_lead_form(
-                *matrices[:5], (matrices[5], matrices[6], matrices[7], matrices[8])
-            )
+            g0, g1, gf, psi, c, cg0, cg1, cpsi, cpi = self._matrices()
+            self._solution = solve_lead_form(g0, g1, gf, psi, c, (cg0, cg1, cpsi, cpi))
             self._solved_at = signature
         return self._solution
 
@@ -195,7 +202,12 @@ class LinearREEconomicModel(BaseEconomicModel):
         return self._bounded_step(y_prev, z, row, level, replacement)
 
     def _bounded_step(
-        self, y_prev: np.ndarray, z: np.ndarray, row: int, level: float, replacement: np.ndarray
+        self,
+        y_prev: np.ndarray,
+        z: np.ndarray,
+        row: int,
+        level: float,
+        replacement: np.ndarray,
     ) -> np.ndarray:
         """Guess how long the bound binds, solve backward, and check the guess.
 
@@ -223,7 +235,9 @@ class LinearREEconomicModel(BaseEconomicModel):
                     "deflationary spiral policy cannot arrest"
                 )
             duration = implied
-        raise LowerBoundNotResolved("the regime sequence at the lower bound did not settle")
+        raise LowerBoundNotResolved(
+            "the regime sequence at the lower bound did not settle"
+        )
 
     def _piecewise(
         self,
@@ -260,8 +274,10 @@ class LinearREEconomicModel(BaseEconomicModel):
                 a_h, k_h, b_h = rules[h]
                 state = a_h @ state + k_h + (b_h @ z if h == 0 else 0.0)
             else:
-                state = reference.a @ state + reference.k + (
-                    reference.b @ z if h == 0 else 0.0
+                state = (
+                    reference.a @ state
+                    + reference.k
+                    + (reference.b @ z if h == 0 else 0.0)
                 )
             path[h] = state
         return path
@@ -285,7 +301,9 @@ class LinearREEconomicModel(BaseEconomicModel):
         """
         shadow = self._shadow_rate(path, y_prev, z, lead)
         realised = path[:, self._bound_variable]
-        binding = np.where(np.arange(len(path)) < guessed, shadow, realised) < level - 1e-10
+        binding = (
+            np.where(np.arange(len(path)) < guessed, shadow, realised) < level - 1e-10
+        )
         hit = np.flatnonzero(binding)
         return int(hit[-1]) + 1 if hit.size else 0
 

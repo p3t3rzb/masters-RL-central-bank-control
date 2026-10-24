@@ -53,10 +53,27 @@ def _assert_same(a, b, fields):
 
 
 RUN_FIELDS = (
-    "states", "params", "actions", "hidden", "dt", "seed", "dampened_steps",
-    "volatility", "crisis_intensity", "climate", "collapsed",
+    "states",
+    "params",
+    "actions",
+    "hidden",
+    "dt",
+    "seed",
+    "dampened_steps",
+    "volatility",
+    "crisis_intensity",
+    "climate",
+    "collapsed",
 )
-SCENARIO_FIELDS = ("params", "hidden", "dt", "seed", "volatility", "crisis_intensity", "climate")
+SCENARIO_FIELDS = (
+    "params",
+    "hidden",
+    "dt",
+    "seed",
+    "volatility",
+    "crisis_intensity",
+    "climate",
+)
 
 
 @pytest.mark.parametrize("full", [True, False], ids=["full", "bare"])
@@ -110,7 +127,10 @@ def test_group_layout(tmp_path):
 def test_manifest_round_trip_carries_the_config(tmp_path):
     """A dataset's manifest is plain JSON, config included."""
     config = DatasetConfig(n_runs=2, workers=1)
-    manifest = {"config": storage.config_to_dict(config), "splits": {"train": {"n_groups": 2}}}
+    manifest = {
+        "config": storage.config_to_dict(config),
+        "splits": {"train": {"n_groups": 2}},
+    }
     storage.write_manifest(tmp_path / "ds", manifest)
     assert storage.read_manifest(tmp_path / "ds") == json.loads(json.dumps(manifest))
     assert storage.read_manifest(tmp_path / "ds")["config"]["n_runs"] == 2

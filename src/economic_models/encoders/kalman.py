@@ -103,14 +103,17 @@ class KalmanEncoder(GenerativeEncoder):
 
     def _sy(self, F: np.ndarray) -> np.ndarray:
         """Column-standardise observation rows ``F``."""
+        assert self._y_scaler is not None
         return self._y_scaler.transform(F)
 
     def _su(self, U: np.ndarray) -> np.ndarray:
         """Column-standardise exog input rows ``U``."""
+        assert self._u_scaler is not None
         return self._u_scaler.transform(U)
 
     def _inv_y(self, Y: np.ndarray) -> np.ndarray:
         """Map standardised observations ``Y`` back to original feature units."""
+        assert self._y_scaler is not None
         return self._y_scaler.inverse_transform(Y)
 
     # -- Kalman filter / smoother (single run, standardized) ----------------
@@ -124,9 +127,12 @@ class KalmanEncoder(GenerativeEncoder):
         predicted ``z_t|t-1`` (needed by the smoother); ``Kf`` the filter gains
         (needed for the lag-one smoother init); ``ll`` the run log-likelihood.
         """
-        N, m, dy = len(Y), self._m, self.C_.shape[0]
         A, B, C, Q, R = self.A_, self.B_, self.C_, self.Q_, self.R_
-        I = np.eye(m)
+        assert A is not None and B is not None and C is not None
+        assert Q is not None and R is not None
+        assert self.mu0_ is not None and self.V0_ is not None
+        N, m, dy = len(Y), self._m, C.shape[0]
+        I = np.eye(m)  # noqa: E741 - identity matrix, as in the filter equations
         mf, Pf = np.zeros((N, m)), np.zeros((N, m, m))
         mp, Pp = np.zeros((N, m)), np.zeros((N, m, m))
         Kf = np.zeros((N, m, dy))
@@ -180,8 +186,7 @@ class KalmanEncoder(GenerativeEncoder):
             Plag[N - 1] = (np.eye(m) - Kf[N - 1] @ C) @ A @ Pf[N - 2]
             for t in range(N - 2, 0, -1):
                 Plag[t] = (
-                    Pf[t] @ J[t - 1].T
-                    + J[t] @ (Plag[t + 1] - A @ Pf[t]) @ J[t - 1].T
+                    Pf[t] @ J[t - 1].T + J[t] @ (Plag[t + 1] - A @ Pf[t]) @ J[t - 1].T
                 )
         return ms, Ps, Plag
 
@@ -225,9 +230,7 @@ class KalmanEncoder(GenerativeEncoder):
         # Latent scores per run, then regress z_t on [z_{t-1}, u_t] for A, B.
         Z = [Y @ C for Y, _ in runs]
         zt = np.vstack([z[1:] for z in Z])
-        prev = np.vstack(
-            [np.hstack([z[:-1], U[1:]]) for z, (_, U) in zip(Z, runs)]
-        )
+        prev = np.vstack([np.hstack([z[:-1], U[1:]]) for z, (_, U) in zip(Z, runs)])
         AB, *_ = np.linalg.lstsq(prev, zt, rcond=None)
         A = AB[:m].T
         B = AB[m:].T
@@ -238,7 +241,9 @@ class KalmanEncoder(GenerativeEncoder):
         self.R_ = np.diag(obs_resid.var(axis=0) + self.jitter)
         z0 = np.array([z[0] for z in Z])
         self.mu0_ = z0.mean(axis=0)
-        self.V0_ = (np.cov(z0.T) if len(z0) > 1 else np.eye(m)) + np.eye(m) * self.jitter
+        self.V0_ = (np.cov(z0.T) if len(z0) > 1 else np.eye(m)) + np.eye(
+            m
+        ) * self.jitter
 
     def fit(self, feature_runs: list[tuple[np.ndarray, np.ndarray]]) -> Self:
         """Fit the state-space model by EM and cache the standardisers."""
@@ -250,6 +255,7 @@ class KalmanEncoder(GenerativeEncoder):
         runs = [(self._sy(F), self._su(U)) for F, U in feature_runs]
 
         self._pca_init(runs)
+        assert self.C_ is not None and self.B_ is not None
         m, dy, ku = self._m, self.C_.shape[0], self.B_.shape[1]
         self.loglik_ = []
         prev_ll = -np.inf
@@ -335,17 +341,23 @@ class KalmanEncoder(GenerativeEncoder):
         """Return the belief's posterior mean as the conditioning latent."""
         return belief.mean.copy()
 
-    def _predict(self, belief: _Belief, u_next: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _predict(
+        self, belief: _Belief, u_next: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
         """One-step latent prior ``(mean, cov)`` given standardized next exog."""
+        assert self.A_ is not None and self.B_ is not None and self.Q_ is not None
         mp = self.A_ @ belief.mean + self.B_ @ u_next
         Pp = self.A_ @ belief.cov @ self.A_.T + self.Q_
         return mp, Pp
 
-    def advance(self, belief: _Belief, f_next: np.ndarray, u_next: np.ndarray) -> _Belief:
+    def advance(
+        self, belief: _Belief, f_next: np.ndarray, u_next: np.ndarray
+    ) -> _Belief:
         """Fold one realised ``(f_next, u_next)`` in via a Kalman predict+update."""
         y = self._sy(f_next[None, :])[0]
         u = self._su(u_next[None, :])[0]
         mp, Pp = self._predict(belief, u)
+        assert self.C_ is not None and self.R_ is not None
         dy = self.C_.shape[0]
         S = self.C_ @ Pp @ self.C_.T + self.R_
         S = 0.5 * (S + S.T) + self.jitter * np.eye(dy)
@@ -366,6 +378,7 @@ class KalmanEncoder(GenerativeEncoder):
         """One-step feature forecast ``C(A z + B u)``; a draw if ``rng`` is given."""
         u = self._su(u_next[None, :])[0]
         mp, Pp = self._predict(belief, u)
+        assert self.C_ is not None and self.R_ is not None
         y = self.C_ @ mp
         if rng is not None:
             dy = self.C_.shape[0]
@@ -382,5 +395,6 @@ class KalmanEncoder(GenerativeEncoder):
         deterministic ``C (A z + B u)`` forecast in original feature units.
         """
         Uc = self._su(U_next)
+        assert self.A_ is not None and self.B_ is not None and self.C_ is not None
         Ystd = (Z @ self.A_.T + Uc @ self.B_.T) @ self.C_.T
         return self._inv_y(Ystd)

@@ -12,7 +12,11 @@ import dataclasses
 import numpy as np
 import pytest
 
-from economic_models.ground_truth.models.smets_wouters import SwCalibration, SwModel, SwState
+from economic_models.ground_truth.models.smets_wouters import (
+    SwCalibration,
+    SwModel,
+    SwState,
+)
 
 
 @pytest.fixture(scope="module")

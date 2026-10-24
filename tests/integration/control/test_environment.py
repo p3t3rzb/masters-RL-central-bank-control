@@ -32,7 +32,9 @@ def env(stack) -> CentralBankEnv:
 
 def _position(env: CentralBankEnv) -> np.ndarray:
     """Where the levers stand now, in the normalised box."""
-    return env.to_normalised(env.interface.actions.from_row(env.exog[-1][-env.action_dim :]).to_dict())
+    return env.to_normalised(
+        env.interface.actions.from_row(env.exog[-1][-env.action_dim :]).to_dict()
+    )
 
 
 def _fresh(stack, **config) -> CentralBankEnv:
@@ -100,7 +102,9 @@ def test_applied_step_is_the_position_change(env):
         before = _position(env)
         *_, info = env.step(np.ones(env.action_dim))
         after = _position(env)
-        np.testing.assert_allclose(info["action"], (after - before) / env.delta_step, atol=1e-9)
+        np.testing.assert_allclose(
+            info["action"], (after - before) / env.delta_step, atol=1e-9
+        )
         assert np.all(np.abs(after) <= 1.0 + 1e-12)
         assert np.all(info["action"] <= 1.0 + 1e-12)
         clipped |= bool(np.any(info["action"] < 1.0 - 1e-9))
@@ -203,7 +207,9 @@ def test_resting_policy_survives_the_ground_truth(stack):
     """The calibration levers keep the structural economy inside its corridor."""
     config = free_instrument(stack.config)
     env = build_truth_env(stack.world, stack.observer, stack.env.reward, config)
-    score = evaluate(env, constant_policy(env, calibration_actions(stack.world.config.model)), 2)
+    score = evaluate(
+        env, constant_policy(env, calibration_actions(stack.world.config.model)), 2
+    )
     assert score["collapse_rate"] == 0.0
     assert score["length"] == env.horizon
     assert np.isfinite(score["return"])
@@ -212,7 +218,9 @@ def test_resting_policy_survives_the_ground_truth(stack):
 def test_rollout_records_one_row_per_future(stack):
     """The picture has a row per future and a column per step, no collapses."""
     env = stack.eval_env
-    series = rollout(env, constant_policy(env, calibration_actions(stack.world.config.model)), 2)
+    series = rollout(
+        env, constant_policy(env, calibration_actions(stack.world.config.model)), 2
+    )
     for name in (*env.interface.actions.names(), "growth", "potential", "ER", "PI"):
         assert series[name].shape == (2, env.horizon), name
         assert np.all(np.isfinite(series[name])), name

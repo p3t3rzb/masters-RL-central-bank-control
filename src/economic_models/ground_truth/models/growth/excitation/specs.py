@@ -51,7 +51,7 @@ class GovSpendingSpec:
 
     def perturbed(
         self, rng: np.random.Generator, jitter: ExcitationJitter
-    ) -> "GovSpendingSpec":
+    ) -> GovSpendingSpec:
         """A neighbouring fiscal authority: same instrument, different reflexes.
 
         ``stabilizer`` is redrawn under ``jitter.feedback`` rather than

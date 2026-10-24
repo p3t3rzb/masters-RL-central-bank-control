@@ -4,7 +4,16 @@ from economic_models.ground_truth.models.smets_wouters.excitation.generator impo
     SwExcitationProcess,
     SwRunGenerator,
 )
-from economic_models.ground_truth.models.smets_wouters.excitation.presets import SwExcitationConfig
-from economic_models.ground_truth.models.smets_wouters.excitation.specs import SpendingSpec
+from economic_models.ground_truth.models.smets_wouters.excitation.presets import (
+    SwExcitationConfig,
+)
+from economic_models.ground_truth.models.smets_wouters.excitation.specs import (
+    SpendingSpec,
+)
 
-__all__ = ["SwExcitationConfig", "SwExcitationProcess", "SwRunGenerator", "SpendingSpec"]
+__all__ = [
+    "SwExcitationConfig",
+    "SwExcitationProcess",
+    "SwRunGenerator",
+    "SpendingSpec",
+]

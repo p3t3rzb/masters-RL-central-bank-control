@@ -75,7 +75,11 @@ def test_checkpoint_reloads_into_a_rebuilt_agent(result, config, tmp_path):
     result.agent.save(path)
     env = result.eval_env
     fresh = DSACAgent(
-        env.obs_dim, env.action_dim, n_quantiles=config.n_quantiles, hidden=config.hidden, seed=99
+        env.obs_dim,
+        env.action_dim,
+        n_quantiles=config.n_quantiles,
+        hidden=config.hidden,
+        seed=99,
     )
     fresh.load(path)
     obs, _ = env.reset(seed=0)

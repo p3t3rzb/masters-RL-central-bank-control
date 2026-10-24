@@ -115,6 +115,7 @@ class VARXProxy(BaseProxyModel):
 
     def _standardized(self, X: np.ndarray) -> np.ndarray:
         """The design rows as the fitted ridge sees them, scaler applied."""
+        assert self.reg_ is not None
         return self.reg_[0].transform(np.atleast_2d(X))
 
     def _leverage(self, x: np.ndarray) -> float:
@@ -134,11 +135,10 @@ class VARXProxy(BaseProxyModel):
         self, z: np.ndarray, u_next: np.ndarray, f_prev: np.ndarray
     ) -> np.ndarray:
         """Ridge conditional-mean predictions for the design rows."""
+        assert self.reg_ is not None
         return self.reg_.predict(self._design(z, u_next))
 
-    def _sample_step(
-        self, ctx: StepContext, rng: np.random.Generator
-    ) -> np.ndarray:
+    def _sample_step(self, ctx: StepContext, rng: np.random.Generator) -> np.ndarray:
         """One draw: the ridge mean plus correlated residual noise.
 
         Under :attr:`epistemic` the noise is scaled by ``sqrt(1 + h)``, the
@@ -156,6 +156,7 @@ class VARXProxy(BaseProxyModel):
         read it as a lower bound on how little the model knows out there, not as
         the whole of it.
         """
+        assert self.reg_ is not None and self._chol is not None
         x = self._design(ctx.z, ctx.u_next)
         mean = self.reg_.predict(x[None, :])[0]
         noise = self._chol @ rng.standard_normal(len(mean))

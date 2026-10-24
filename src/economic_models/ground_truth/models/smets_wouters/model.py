@@ -27,13 +27,16 @@ Three of the model's quantities are not in the paper and are worth naming:
 from __future__ import annotations
 
 import math
-from typing import Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 import numpy as np
 
 from economic_models.ground_truth.linear_re import LinearREEconomicModel
 from economic_models.ground_truth.models.smets_wouters.calibration import SwCalibration
-from economic_models.ground_truth.models.smets_wouters.equations import VARIABLES, build_system
+from economic_models.ground_truth.models.smets_wouters.equations import (
+    VARIABLES,
+    build_system,
+)
 from economic_models.ground_truth.models.smets_wouters.modules.exogenous import (
     DRIVEN,
     POLICY_EQUATION,
@@ -44,6 +47,7 @@ from economic_models.ground_truth.models.smets_wouters.variables import (
     SwParameters,
     SwState,
 )
+from economic_models.variables import Actions, Parameters
 
 #: Quarters of expected policy rate the long rate averages over: ten years.
 _LONG_HORIZON = 40
@@ -123,7 +127,9 @@ class SwModel(LinearREEconomicModel):
                 f"the Smets-Wouters model is estimated quarterly; dt={dt} would need its "
                 "nominal rigidities and shock processes re-estimated, not rescaled"
             )
-        self.calibration = calibration if calibration is not None else SwCalibration.baseline()
+        self.calibration = (
+            calibration if calibration is not None else SwCalibration.baseline()
+        )
         self.params = self.calibration.params
         self.zero_lower_bound = zero_lower_bound
 
@@ -161,18 +167,18 @@ class SwModel(LinearREEconomicModel):
         """Current values of the central bank's levers."""
         return SwActions.from_dict(self._exogenous)
 
-    def advance(self, parameters: SwParameters, actions: SwActions) -> SwState:
+    def advance(self, parameters: Parameters, actions: Actions) -> SwState:
         """Apply the exogenous inputs and advance one period."""
         self.set_parameters(parameters)
         self.set_actions(actions)
         self.step()
         return self.state
 
-    def set_parameters(self, parameters: SwParameters) -> None:
+    def set_parameters(self, parameters: Parameters) -> None:
         """Set the exogenous parameters the bank observes but does not control."""
         self._exogenous.update(parameters.to_dict())
 
-    def set_actions(self, actions: SwActions) -> None:
+    def set_actions(self, actions: Actions) -> None:
         """Set the central bank's policy levers."""
         self._exogenous.update(actions.to_dict())
 
@@ -196,7 +202,8 @@ class SwModel(LinearREEconomicModel):
     def _parameter_signature(self) -> tuple[float, ...]:
         """The deep parameters, so the solution is reused while they stand still."""
         return tuple(
-            float(getattr(self.params, name)) for name in self.params.__dataclass_fields__
+            float(getattr(self.params, name))
+            for name in self.params.__dataclass_fields__
         )
 
     def _matrices(self) -> tuple[np.ndarray, ...]:
@@ -243,7 +250,8 @@ class SwModel(LinearREEconomicModel):
                 float(x["PIstar"]) * to_quarterly - p.pi_bar,
                 float(x["QE"]) * to_quarterly * p.c3,
                 (float(x["theta"]) - float(base["theta"])) * 100.0,
-                100.0 * math.log(max(float(x["Penergy"]), 1e-9) / float(base["Penergy"])),
+                100.0
+                * math.log(max(float(x["Penergy"]), 1e-9) / float(base["Penergy"])),
             ]
         )
 
@@ -368,8 +376,12 @@ class SwModel(LinearREEconomicModel):
         state-space law of motion is.
         """
         expected = self.solution.forward(self._y, _LONG_HORIZON)[:, self._index["r"]]
-        average = (self._y[self._index["r"]] + float(np.sum(expected[:-1]))) / _LONG_HORIZON
-        return 4.0 * (self.params.r_ss + average) / 100.0 + float(self._exogenous["ADDbl"])
+        average = (
+            self._y[self._index["r"]] + float(np.sum(expected[:-1]))
+        ) / _LONG_HORIZON
+        return 4.0 * (self.params.r_ss + average) / 100.0 + float(
+            self._exogenous["ADDbl"]
+        )
 
     def _observe(self) -> SwState:
         """The visible state implied by the current deviations and levels."""
@@ -398,13 +410,21 @@ class SwModel(LinearREEconomicModel):
     def _record(self) -> dict[str, float]:
         """The whole internal state, flat, as branching needs it."""
         record = {name: float(self._y[i]) for i, name in enumerate(VARIABLES)}
-        record.update({f"prev_{name}": float(self._y_previous[i]) for i, name in enumerate(VARIABLES)})
+        record.update(
+            {
+                f"prev_{name}": float(self._y_previous[i])
+                for i, name in enumerate(VARIABLES)
+            }
+        )
         record.update({name: float(value) for name, value in self._levels.items()})
         record.update({f"prev_{name}": float(v) for name, v in self._previous.items()})
         record.update({name: float(v) for name, v in self._exogenous.items()})
         record.update({name: float(v) for name, v in self._shocks.items()})
         record.update(
-            {name: float(getattr(self.params, name)) for name in self.params.__dataclass_fields__}
+            {
+                name: float(getattr(self.params, name))
+                for name in self.params.__dataclass_fields__
+            }
         )
         record.update(self._state.to_dict())  # the visible row the generator reads
         record["PSBR"] = self._psbr

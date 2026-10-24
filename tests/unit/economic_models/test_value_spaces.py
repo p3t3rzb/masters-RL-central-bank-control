@@ -24,7 +24,14 @@ from economic_models.ground_truth.models.smets_wouters.variables import (
 )
 from economic_models.variables import Actions, Parameters, State
 
-SPACES = [GrowthState, GrowthParameters, GrowthActions, SwState, SwParameters, SwActions]
+SPACES = [
+    GrowthState,
+    GrowthParameters,
+    GrowthActions,
+    SwState,
+    SwParameters,
+    SwActions,
+]
 
 
 @pytest.mark.parametrize("space", [State, Parameters, Actions])

@@ -43,7 +43,9 @@ class GrowthParameters(Parameters):
     theta: float = _observable("Income tax rate")
     Nfe: float = _observable("Full employment level")
     GRpr: float = _observable("Growth rate of productivity")
-    ADDbl: float = _observable("Spread between long-term interest rate and rate on bills")
+    ADDbl: float = _observable(
+        "Spread between long-term interest rate and rate on bills"
+    )
     Rln: float = _observable("Normal interest rate on loans")
     NPLk: float = _observable("Proportion of Non-Performing loans")
 
@@ -53,5 +55,7 @@ class GrowthActions(Actions):
     """The three levers the GROWTH-model central bank directly controls."""
 
     Rbbar: float = _observable("Interest rate on bills, set exogenously (policy rate)")
-    NCAR: float = _observable("Normal capital adequacy ratio of banks (capital requirement)")
+    NCAR: float = _observable(
+        "Normal capital adequacy ratio of banks (capital requirement)"
+    )
     ro: float = _observable("Reserve requirement ratio on deposits")
