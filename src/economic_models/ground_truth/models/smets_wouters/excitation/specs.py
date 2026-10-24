@@ -26,6 +26,13 @@ _EMPLOYMENT_SS = 0.95
 #: linearisation is meaningless.
 _CLIP_SIGMAS = 5.0
 
+#: The paper's estimation frequency, against this project's annual specs.
+_QUARTERS_PER_YEAR = 4
+
+#: Floor under a variance or denominator, so a process at the unit root yields
+#: an extreme but finite spec instead of a division by zero.
+_EPS = 1e-12
+
 
 def from_quarterly(
     rho: float, sigma: float, *, ma: float = 0.0, clip: float = _CLIP_SIGMAS
@@ -48,15 +55,16 @@ def from_quarterly(
     driver of long-run output four times too large and far too persistent, and the
     economy walks away from its own steady state.
     """
-    variance_ratio = (1.0 - 2.0 * rho * ma + ma**2) / max(1.0 - rho**2, 1e-12)
-    stationary = sigma * math.sqrt(max(variance_ratio, 1e-12))
+    # The ARMA(1,1) variance numerator; at ``ma = 0`` it is one and the process
+    # is the plain AR(1).
+    ma_factor = 1.0 - 2.0 * rho * ma + ma**2
+    variance_ratio = ma_factor / max(1.0 - rho**2, _EPS)
+    stationary = sigma * math.sqrt(max(variance_ratio, _EPS))
     autocorrelation = (
-        (rho - ma) * (1.0 - rho * ma) / max(1.0 - 2.0 * rho * ma + ma**2, 1e-12)
-        if ma
-        else rho
+        (rho - ma) * (1.0 - rho * ma) / max(ma_factor, _EPS) if ma else rho
     )
-    phi = max(autocorrelation, 0.0) ** 4
-    annual_sigma = stationary * math.sqrt(max(1.0 - phi**2, 1e-12))
+    phi = max(autocorrelation, 0.0) ** _QUARTERS_PER_YEAR
+    annual_sigma = stationary * math.sqrt(max(1.0 - phi**2, _EPS))
     reach = clip * stationary
     return AR1Spec(sigma=annual_sigma, lower=-reach, upper=reach, phi=phi)
 
