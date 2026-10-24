@@ -22,9 +22,8 @@ from typing import Self
 
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve
-from sklearn.preprocessing import StandardScaler
 
-from economic_models.encoders.base import GenerativeEncoder
+from economic_models.encoders.base import GenerativeEncoder, _StandardizedFeatures
 
 _LOG_2PI = float(np.log(2.0 * np.pi))
 
@@ -37,7 +36,7 @@ class _Belief:
     cov: np.ndarray  # (m, m)
 
 
-class KalmanEncoder(GenerativeEncoder):
+class KalmanEncoder(_StandardizedFeatures, GenerativeEncoder):
     """A linear-Gaussian state-space encoder (Kalman filter, EM-fit)."""
 
     def __init__(
@@ -81,10 +80,6 @@ class KalmanEncoder(GenerativeEncoder):
         self.R_: np.ndarray | None = None  # (dy, dy) diagonal
         self.mu0_: np.ndarray | None = None  # (m,)
         self.V0_: np.ndarray | None = None  # (m, m)
-        # Column standardisers for the observations (f) and exog inputs (u),
-        # fit on the pooled features by :meth:`fit`.
-        self._y_scaler: StandardScaler | None = None
-        self._u_scaler: StandardScaler | None = None
         self.loglik_: list[float] = []  # per-EM-iteration observation log-likelihood
 
     # -- interface ----------------------------------------------------------
@@ -98,23 +93,6 @@ class KalmanEncoder(GenerativeEncoder):
     def min_window(self) -> int:
         """Feature rows needed to warm-start a belief (one)."""
         return 1
-
-    # -- standardisation ----------------------------------------------------
-
-    def _sy(self, F: np.ndarray) -> np.ndarray:
-        """Column-standardise observation rows ``F``."""
-        assert self._y_scaler is not None
-        return self._y_scaler.transform(F)
-
-    def _su(self, U: np.ndarray) -> np.ndarray:
-        """Column-standardise exog input rows ``U``."""
-        assert self._u_scaler is not None
-        return self._u_scaler.transform(U)
-
-    def _inv_y(self, Y: np.ndarray) -> np.ndarray:
-        """Map standardised observations ``Y`` back to original feature units."""
-        assert self._y_scaler is not None
-        return self._y_scaler.inverse_transform(Y)
 
     # -- Kalman filter / smoother (single run, standardized) ----------------
 
@@ -247,11 +225,7 @@ class KalmanEncoder(GenerativeEncoder):
 
     def fit(self, feature_runs: list[tuple[np.ndarray, np.ndarray]]) -> Self:
         """Fit the state-space model by EM and cache the standardisers."""
-        # Fit standardisers on the pooled features, then work standardized.
-        Fall = np.vstack([F for F, _ in feature_runs])
-        Uall = np.vstack([U for _, U in feature_runs])
-        self._y_scaler = StandardScaler().fit(Fall)
-        self._u_scaler = StandardScaler().fit(Uall)
+        self._fit_scalers(feature_runs)
         runs = [(self._sy(F), self._su(U)) for F, U in feature_runs]
 
         self._pca_init(runs)

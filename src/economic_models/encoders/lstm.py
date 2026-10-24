@@ -26,11 +26,10 @@ from typing import Self
 
 import numpy as np
 import torch
-from sklearn.preprocessing import StandardScaler
 from torch import nn
 
 from economic_models._torch import resolve_device
-from economic_models.encoders.base import GenerativeEncoder
+from economic_models.encoders.base import GenerativeEncoder, _StandardizedFeatures
 
 
 @dataclass
@@ -98,7 +97,7 @@ class _PredictiveLSTM(nn.Module):
         return self.head(torch.cat([h, u_next], dim=-1))
 
 
-class LSTMEncoder(GenerativeEncoder):
+class LSTMEncoder(_StandardizedFeatures, GenerativeEncoder):
     """A nonlinear recurrent (LSTM) predictive-filter state encoder."""
 
     def __init__(
@@ -140,10 +139,6 @@ class LSTMEncoder(GenerativeEncoder):
         self.device = resolve_device(device)
 
         self.net_: _PredictiveLSTM | None = None
-        # Column standardisers for the observations (f) and exog inputs (u),
-        # fit on the pooled features by :meth:`fit`.
-        self._y_scaler: StandardScaler | None = None
-        self._u_scaler: StandardScaler | None = None
         # Per-feature predictive residual std in standardized space, for stochastic
         # forecasts -- the LSTM's analogue of the Kalman encoder's predictive
         # observation covariance.
@@ -162,22 +157,7 @@ class LSTMEncoder(GenerativeEncoder):
         """Hard floor of feature rows needed to warm-start a belief."""
         return self._min_window
 
-    # -- standardisation ----------------------------------------------------
-
-    def _sy(self, F: np.ndarray) -> np.ndarray:
-        """Column-standardise observation rows ``F``."""
-        assert self._y_scaler is not None
-        return self._y_scaler.transform(F)
-
-    def _su(self, U: np.ndarray) -> np.ndarray:
-        """Column-standardise exog input rows ``U``."""
-        assert self._u_scaler is not None
-        return self._u_scaler.transform(U)
-
-    def _inv_y(self, Y: np.ndarray) -> np.ndarray:
-        """Map standardised observations ``Y`` back to original feature units."""
-        assert self._y_scaler is not None
-        return self._y_scaler.inverse_transform(Y)
+    # -- tensors ------------------------------------------------------------
 
     def _t(self, A: np.ndarray) -> torch.Tensor:
         """Convert an array to a float32 tensor on the encoder's device."""
@@ -190,11 +170,8 @@ class LSTMEncoder(GenerativeEncoder):
         if self.seed is not None:
             torch.manual_seed(self.seed)
 
-        Fall = np.vstack([F for F, _ in feature_runs])
-        Uall = np.vstack([U for _, U in feature_runs])
-        self._y_scaler = StandardScaler().fit(Fall)
-        self._u_scaler = StandardScaler().fit(Uall)
-        dy, ku = Fall.shape[1], Uall.shape[1]
+        F_all, U_all = self._fit_scalers(feature_runs)
+        dy, ku = F_all.shape[1], U_all.shape[1]
 
         # Only runs with at least one transition contribute training pairs.
         runs = [(self._sy(F), self._su(U)) for F, U in feature_runs if len(F) >= 2]
