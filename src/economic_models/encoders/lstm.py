@@ -252,16 +252,40 @@ class LSTMEncoder(_StandardizedFeatures, GenerativeEncoder):
         self._resid_std = resid.std(axis=0)
         self._resid_std[self._resid_std == 0] = _RESID_STD_FLOOR
 
+    # -- running the trained network ----------------------------------------
+
+    def _encode(
+        self,
+        F: np.ndarray,
+        U: np.ndarray,
+        state: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        """Run the LSTM over raw feature rows ``(F, U)``, from ``state`` if given."""
+        X = np.hstack([self._sy(F), self._su(U)])[None, :, :]
+        assert self.net_ is not None
+        self.net_.eval()
+        with torch.no_grad():
+            return self.net_.encode(self._t(X), state)
+
+    def _read(self, H: np.ndarray, U_next: np.ndarray) -> np.ndarray:
+        """Standardized head forecast from hidden rows ``H`` and raw next exog."""
+        h, u = self._t(H), self._t(self._su(U_next))
+        assert self.net_ is not None
+        self.net_.eval()
+        with torch.no_grad():
+            return self.net_.read(h, u).cpu().numpy()
+
+    @staticmethod
+    def _to_belief(h: torch.Tensor, c: torch.Tensor) -> _Belief:
+        """Detach the single sequence's ``(h, c)`` into a numpy belief."""
+        return _Belief(h=h[:, 0, :].cpu().numpy(), c=c[:, 0, :].cpu().numpy())
+
     # -- batch encode -------------------------------------------------------
 
     def encode_run(self, F: np.ndarray, U: np.ndarray) -> np.ndarray:
         """Causal hidden-state latent per period for one run, ``(len(F), m)``."""
         self._require_fitted()
-        X = np.hstack([self._sy(F), self._su(U)])[None, :, :]
-        assert self.net_ is not None
-        self.net_.eval()
-        with torch.no_grad():
-            H, _ = self.net_.encode(self._t(X))
+        H, _ = self._encode(F, U)
         return H[0].cpu().numpy()
 
     # -- online -------------------------------------------------------------
@@ -269,34 +293,23 @@ class LSTMEncoder(_StandardizedFeatures, GenerativeEncoder):
     def init_belief(self, F_win: np.ndarray, U_win: np.ndarray) -> _Belief:
         """Warm-start the ``(h, c)`` state by running the LSTM over the window."""
         self._require_fitted()
-        X = np.hstack([self._sy(F_win), self._su(U_win)])[None, :, :]
-        assert self.net_ is not None
-        self.net_.eval()
-        with torch.no_grad():
-            _, (h, c) = self.net_.encode(self._t(X))
-        return _Belief(h=h[:, 0, :].cpu().numpy(), c=c[:, 0, :].cpu().numpy())
+        _, (h, c) = self._encode(F_win, U_win)
+        return self._to_belief(h, c)
 
     def latent(self, belief: _Belief) -> np.ndarray:
         """Return the top layer's hidden state as the conditioning latent."""
-        # The top layer's hidden state is the conditioning latent.
         return belief.h[-1].copy()
 
     def advance(
         self, belief: _Belief, f_next: np.ndarray, u_next: np.ndarray
     ) -> _Belief:
         """Fold one realised ``(f_next, u_next)`` in via one LSTM step."""
-        x = np.hstack([self._sy(f_next[None, :]), self._su(u_next[None, :])])[
-            None, :, :
-        ]
         state = (
             self._t(belief.h)[:, None, :].contiguous(),
             self._t(belief.c)[:, None, :].contiguous(),
         )
-        assert self.net_ is not None
-        self.net_.eval()
-        with torch.no_grad():
-            _, (h, c) = self.net_.encode(self._t(x), state)
-        return _Belief(h=h[:, 0, :].cpu().numpy(), c=c[:, 0, :].cpu().numpy())
+        _, (h, c) = self._encode(f_next[None, :], u_next[None, :], state)
+        return self._to_belief(h, c)
 
     # -- generative forecast ------------------------------------------------
 
@@ -307,12 +320,7 @@ class LSTMEncoder(_StandardizedFeatures, GenerativeEncoder):
         rng: np.random.Generator | None = None,
     ) -> np.ndarray:
         """One-step head forecast from the belief; a draw if ``rng`` is given."""
-        h = self._t(belief.h[-1][None, :])
-        u = self._t(self._su(u_next[None, :]))
-        assert self.net_ is not None
-        self.net_.eval()
-        with torch.no_grad():
-            y = self.net_.read(h, u).cpu().numpy()[0]
+        y = self._read(belief.h[-1][None, :], u_next[None, :])[0]
         if rng is not None:
             y = y + self._resid_std * rng.standard_normal(y.shape[0])
         return self._inv_y(y[None, :])[0]
@@ -324,10 +332,4 @@ class LSTMEncoder(_StandardizedFeatures, GenerativeEncoder):
         the raw exog features of each target period; returns the deterministic head
         forecast in original feature units.
         """
-        h = self._t(Z)
-        u = self._t(self._su(U_next))
-        assert self.net_ is not None
-        self.net_.eval()
-        with torch.no_grad():
-            Ystd = self.net_.read(h, u).cpu().numpy()
-        return self._inv_y(Ystd)
+        return self._inv_y(self._read(Z, U_next))
